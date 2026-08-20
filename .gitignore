@@ -1,0 +1,20 @@
+# Artefactos de build
+audio-optimizer/build/
+audio-optimizer/build-gui/
+audio-optimizer/build-nmake/
+audio-optimizer/build-vs/
+
+# Binarios de terceros / descargas grandes (no van al repo, se manejan
+# aparte: VB-CABLE se redistribuye vía el instalador, no versionado en git)
+VBCABLE_Driver_Pack45/
+VBCABLE_Driver_Pack45.zip
+installer/package/VBCABLE_Setup_x64.exe
+installer/package/payload.zip
+
+# Ejecutables/objetos compilados (main.exe, payload, etc.). El .exe final
+# SÍ se distribuye, pero como asset de un GitHub Release, no versionado en
+# el árbol de git.
+*.exe
+*.obj
+*.pdb
+*.ilk

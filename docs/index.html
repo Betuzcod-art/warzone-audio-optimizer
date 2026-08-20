@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warzone Audio Optimizer</title>
+<style>
+  :root {
+    --bg: #12161d;
+    --panel: #1b212b;
+    --panel-border: #2a3140;
+    --text: #ebf0f6;
+    --muted: #94a0af;
+    --accent: #4cb2ff;
+    --online: #46d291;
+    --warning: #f6bb4e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+  }
+  header {
+    padding: 64px 24px 40px;
+    text-align: center;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  header h1 {
+    margin: 0 0 8px;
+    font-size: 2rem;
+    letter-spacing: 0.02em;
+  }
+  header p.tagline {
+    color: var(--muted);
+    margin: 0 0 28px;
+    font-size: 1rem;
+  }
+  .btn {
+    display: inline-block;
+    padding: 14px 28px;
+    border-radius: 8px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: #06131f;
+  }
+  .btn-secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    margin-left: 12px;
+  }
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+  section {
+    margin-bottom: 40px;
+  }
+  h2 {
+    font-size: 1.1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 20px 24px;
+  }
+  ol, ul {
+    padding-left: 20px;
+    margin: 0;
+  }
+  li { margin-bottom: 8px; }
+  code {
+    background: #0e1218;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+  .feature {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .feature h3 {
+    margin: 0 0 6px;
+    font-size: 0.95rem;
+    color: var(--accent);
+  }
+  .feature p {
+    margin: 0;
+    font-size: 0.88rem;
+    color: var(--muted);
+  }
+  .notice {
+    border-left: 3px solid var(--warning);
+    padding: 12px 16px;
+    background: rgba(246, 187, 78, 0.08);
+    border-radius: 0 8px 8px 0;
+    font-size: 0.9rem;
+  }
+  .checksum {
+    font-family: Consolas, monospace;
+    font-size: 0.82rem;
+    word-break: break-all;
+    color: var(--muted);
+  }
+  footer {
+    text-align: center;
+    padding: 32px 24px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    border-top: 1px solid var(--panel-border);
+  }
+  footer a { color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Warzone Audio Optimizer</h1>
+  <p class="tagline">Pasos claros y direccionales. Motores, helicópteros, granadas y disparos a raya. Baja latencia real.</p>
+  <a class="btn btn-primary" href="https://github.com/TU_USUARIO/TU_REPO/releases/latest">Descargar última versión</a>
+  <a class="btn btn-secondary" href="https://github.com/TU_USUARIO/TU_REPO/releases">Ver todas las versiones</a>
+</header>
+
+<main>
+
+  <section>
+    <h2>Qué hace</h2>
+    <div class="grid">
+      <div class="feature">
+        <h3>Pasos y direcciones nítidas</h3>
+        <p>Realce multibanda enfocado en pasos, recargas y ropa/equipo, sin tocar el balance L/R que da la dirección.</p>
+      </div>
+      <div class="feature">
+        <h3>Menos ruido de fondo</h3>
+        <p>Compresión dedicada que agacha motores, hélices y el cuerpo de explosiones/disparos, dejando los pasos relativamente más audibles.</p>
+      </div>
+      <div class="feature">
+        <h3>Baja latencia</h3>
+        <p>Modo WASAPI Exclusive cuando el driver lo soporta (evita el mezclador de Windows), con fallback automático a Shared si no.</p>
+      </div>
+      <div class="feature">
+        <h3>Sin delay acumulado</h3>
+        <p>Corrección de drift entre el reloj de captura y el de render, para que la latencia no crezca durante partidas largas.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Instalación</h2>
+    <div class="card">
+      <ol>
+        <li>Descarga <code>WarzoneAudioOptimizer-Setup.exe</code> desde el botón de arriba y ejecútalo como administrador.</li>
+        <li>Completa la instalación del driver <strong>VB-CABLE</strong> cuando te lo pida.</li>
+        <li>Reinicia Windows tras instalar el driver.</li>
+        <li>En Warzone, selecciona como salida de audio: <code>CABLE Input (VB-Audio Virtual Cable)</code>.</li>
+        <li>Deja tus auriculares/altavoces físicos como salida predeterminada de Windows.</li>
+        <li>Abre Warzone Audio Optimizer y pulsa <strong>ACTIVAR PROCESAMIENTO</strong>.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <h2>Antes de instalar, lee esto</h2>
+    <div class="notice">
+      Windows puede mostrar un aviso de <strong>SmartScreen ("Editor desconocido")</strong> al ejecutar el instalador.
+      Esto es normal en software nuevo sin certificado de firma comercial pagado — no significa que el archivo esté
+      dañado. Verifica el checksum SHA-256 de abajo contra el archivo descargado antes de ejecutarlo si quieres
+      confirmar que no fue alterado.
+    </div>
+  </section>
+
+  <section>
+    <h2>Verificar el instalador (checksum SHA-256)</h2>
+    <div class="card">
+      <p>En PowerShell, dentro de la carpeta donde descargaste el instalador:</p>
+      <p><code>Get-FileHash .\WarzoneAudioOptimizer-Setup.exe -Algorithm SHA256</code></p>
+      <p>Compara el resultado contra el que aparece en la página del
+        <a href="https://github.com/TU_USUARIO/TU_REPO/releases/latest">Release correspondiente en GitHub</a>.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reparar o desinstalar</h2>
+    <div class="card">
+      <p><strong>Reparar:</strong> vuelve a ejecutar el instalador descargado — sobrescribe los archivos de la app sin
+        necesidad de reinstalar VB-CABLE si ya está presente.</p>
+      <p><strong>Desinstalar:</strong> usa "Aplicaciones y características" de Windows, o ejecuta
+        <code>uninstall.cmd</code> desde la carpeta de instalación.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>VB-CABLE</h2>
+    <div class="card">
+      <p>Este instalador incluye <strong>VB-CABLE</strong>, un driver de audio virtual gratuito (donationware) de
+        VB-Audio, necesario para capturar el audio del juego antes de procesarlo. Origen:
+        <a href="https://vb-cable.com">www.vb-cable.com</a>. Si te resulta útil, considera hacer una donación a
+        VB-Audio en <a href="https://vb-audio.com">vb-audio.com</a>.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Changelog</h2>
+    <div class="card">
+      <p><strong>1.0.0</strong> — Primera versión pública. Modo WASAPI Exclusive con fallback automático, guarda
+        anti-drift del ring buffer, cadena DSP multibanda para pasos y reducción de vehículos/explosiones/disparos,
+        y chequeo manual de actualizaciones dentro de la app.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  Proyecto personal, sin afiliación con Activision ni VB-Audio.
+  <a href="https://github.com/TU_USUARIO/TU_REPO">Código fuente</a>
+</footer>
+
+</body>
+</html>

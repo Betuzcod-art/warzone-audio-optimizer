@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "url": "https://github.com/TU_USUARIO/TU_REPO/releases/latest",
+  "sha256": "PENDIENTE_AL_PUBLICAR_EL_RELEASE",
+  "notes": "Primera version publica: modo Exclusive con fallback automatico, guarda anti-drift del buffer, y cadena DSP multibanda (pasos + reduccion de vehiculos/explosiones/disparos)."
+}
