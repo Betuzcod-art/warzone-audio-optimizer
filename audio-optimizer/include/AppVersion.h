@@ -13,10 +13,10 @@ constexpr wchar_t kAppVersion[] = L"1.0.0";
 
 // Página de descarga / changelog público.
 constexpr wchar_t kDownloadPageUrl[] =
-    L"https://TU_USUARIO.github.io/TU_REPO/";
+    L"https://betuzcod-art.github.io/warzone-audio-optimizer/";
 
 // Manifiesto de versión consultado por "Buscar actualizaciones".
 constexpr wchar_t kVersionManifestUrl[] =
-    L"https://TU_USUARIO.github.io/TU_REPO/version.json";
+    L"https://betuzcod-art.github.io/warzone-audio-optimizer/version.json";
 
 } // namespace audiopt
