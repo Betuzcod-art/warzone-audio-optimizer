@@ -66,6 +66,13 @@ public:
     void setMaxBoostDb(float db) { params_.maxBoostDb = db; }
     float maxBoostDb() const { return params_.maxBoostDb; }
 
+    // Limpia los seguidores de nivel sin tocar parámetros ni reservar.
+    // Seguro de llamar desde el hilo de audio.
+    void resetState() {
+        envelopeDb_ = -100.0f;
+        backgroundDb_ = -100.0f;
+    }
+
     void processBlock(float* interleaved, size_t numFrames, uint32_t numChannels) {
         for (size_t i = 0; i < numFrames; ++i) {
             float* frame = &interleaved[i * numChannels];

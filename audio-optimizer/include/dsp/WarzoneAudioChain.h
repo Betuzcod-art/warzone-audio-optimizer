@@ -208,6 +208,24 @@ public:
         pendingVehicleThresholdDb_.store(vehicleParams.thresholdDb, std::memory_order_relaxed);
     }
 
+    // Limpia el estado interno (filtros, detectores) SIN reconfigurar nada
+    // ni reservar memoria. Es lo que debe hacer un "reset" de audio: olvidar
+    // la historia de la señal tras una discontinuidad, no reinicializarse.
+    // Seguro de llamar desde el hilo de audio.
+    void resetState() {
+        for (auto& cf : channelFilters_) {
+            cf.highPass.reset();
+            cf.lowCrossover.reset();
+            cf.airCrossover.reset();
+            cf.footstepDefinition.reset();
+            cf.footstepPresence.reset();
+        }
+        vehicleTamer_.resetState();
+        footstepBooster_.resetState();
+        compressor_.resetState();
+        peakLimiter_.resetState();
+    }
+
     // Reserva los buffers internos para bloques de hasta maxFrames. DEBE
     // llamarse desde fuera del hilo de audio (prepare/LockForProcess): es
     // el único punto de la clase que reserva memoria.

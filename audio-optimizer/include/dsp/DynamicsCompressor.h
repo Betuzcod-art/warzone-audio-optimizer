@@ -53,6 +53,10 @@ public:
     void setThresholdDb(float db) { params_.thresholdDb = db; }
     float thresholdDb() const { return params_.thresholdDb; }
 
+    // Limpia el detector de envolvente sin tocar parámetros ni reservar.
+    // Seguro de llamar desde el hilo de audio.
+    void resetState() { envelopeDb_ = -100.0f; }
+
     // Procesa un bloque interleaved in-place. Detección de envolvente basada
     // en el máximo absoluto entre canales (para no descompensar la imagen
     // estéreo/posicional: la ganancia aplicada es la MISMA para todos los

@@ -6,6 +6,7 @@
 #include <shlobj.h>
 #include <string>
 #include <new>
+#include <stdexcept>
 
 namespace warzoneapo {
 
@@ -116,11 +117,12 @@ STDMETHODIMP_(ULONG) WarzoneApoMfx::Release() {
 // IAudioProcessingObject
 // -----------------------------------------------------------------------------
 STDMETHODIMP WarzoneApoMfx::Reset() {
-    // Limpia el estado interno de filtros y detectores sin resetear ajustes.
-    chain_.prepare(sampleRate_ > 0 ? sampleRate_ : 48000.0,
-                   channelCount_ > 0 ? channelCount_ : 2);
-    if (maxFrameCount_ > 0) chain_.reserve(maxFrameCount_);
-    loadUserSettings();
+    // "Reset" en audio significa olvidar la historia de la señal tras una
+    // discontinuidad, NO reinicializarse. Aquí es solo limpiar filtros y
+    // detectores: el motor puede llamar a este método con el stream activo,
+    // así que no se reserva memoria ni se lee del disco (eso vive en
+    // LockForProcess, que sí es el punto de configuración).
+    chain_.resetState();
     return S_OK;
 }
 
@@ -247,9 +249,23 @@ STDMETHODIMP WarzoneApoMfx::LockForProcess(
         maxFrameCount_ = output->u32MaxFrameCount;
     }
 
+    if (maxFrameCount_ == 0) return APOERR_INVALID_OUTPUT_MAXFRAMECOUNT;
+
     // Toda la reserva de memoria ocurre aquí, nunca en APOProcess.
-    chain_.prepare(static_cast<double>(sampleRate_), channelCount_);
-    chain_.reserve(maxFrameCount_);
+    //
+    // El try/catch no es decorativo: prepare() y reserve() reservan, y una
+    // excepción de C++ escapando por una frontera COM es comportamiento
+    // indefinido -- dentro de audiodg.exe puede tumbar el audio de todo el
+    // sistema. Un fallo de reserva debe salir como HRESULT, no como throw.
+    try {
+        chain_.prepare(static_cast<double>(sampleRate_), channelCount_);
+        chain_.reserve(maxFrameCount_);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
+    }
+
     loadUserSettings();
 
     locked_ = true;
@@ -263,6 +279,19 @@ STDMETHODIMP WarzoneApoMfx::UnlockForProcess() {
 }
 
 void WarzoneApoMfx::loadUserSettings() {
+    // Leer del disco y construir strings puede lanzar; igual que arriba, nada
+    // de eso debe escapar hacia el motor de audio. Si falla, los ajustes se
+    // quedan en sus valores por defecto, que es un estado perfectamente
+    // usable -- mucho mejor que propagar la excepción.
+    try {
+        loadUserSettingsImpl();
+    } catch (...) {
+        // Silencio deliberado: sin ajustes de usuario el APO sigue siendo
+        // funcional con los valores por defecto de la cadena.
+    }
+}
+
+void WarzoneApoMfx::loadUserSettingsImpl() {
     const std::wstring path = settingsPath();
 
     // Si el archivo no existe todavía (el usuario nunca abrió la app), cada

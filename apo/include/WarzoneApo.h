@@ -92,7 +92,9 @@ private:
     // Relee los ajustes del usuario desde disco. Se llama fuera del camino
     // de tiempo real (LockForProcess): leer un archivo dentro de APOProcess
     // sería exactamente el tipo de llamada bloqueante que está prohibida.
+    // Envuelve a loadUserSettingsImpl para que ninguna excepción escape.
     void loadUserSettings();
+    void loadUserSettingsImpl();
 
     std::atomic<ULONG> refCount_{1};
     audiopt::WarzoneAudioChain chain_;
