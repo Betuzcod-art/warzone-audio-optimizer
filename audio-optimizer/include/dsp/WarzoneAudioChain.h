@@ -81,6 +81,10 @@ struct ChannelFilters {
 
 class WarzoneAudioChain {
 public:
+    // Reserva por defecto: cubre de sobra los bloques típicos (64-1056
+    // frames). El APO la ajusta al máximo real vía reserve().
+    static constexpr size_t kDefaultScratchFrames = 4096;
+
     void prepare(double sampleRate, uint32_t numChannels) {
         sampleRate_ = sampleRate;
         numChannels_ = numChannels;
@@ -195,10 +199,7 @@ public:
         lp.makeupGainDb = 0.0f;
         peakLimiter_.prepare(sampleRate, lp);
 
-        const size_t scratchFrames = 4096;
-        lowBand_.assign(scratchFrames * numChannels_, 0.0f);
-        highBand_.assign(scratchFrames * numChannels_, 0.0f);
-        airBand_.assign(scratchFrames * numChannels_, 0.0f);
+        reserve(kDefaultScratchFrames);
 
         // Sincroniza los "pendientes" con lo que acabamos de configurar,
         // para que un prepare() posterior no revierta ajustes del usuario
@@ -207,19 +208,35 @@ public:
         pendingVehicleThresholdDb_.store(vehicleParams.thresholdDb, std::memory_order_relaxed);
     }
 
+    // Reserva los buffers internos para bloques de hasta maxFrames. DEBE
+    // llamarse desde fuera del hilo de audio (prepare/LockForProcess): es
+    // el único punto de la clase que reserva memoria.
+    void reserve(size_t maxFrames) {
+        const size_t samples = maxFrames * numChannels_;
+        lowBand_.assign(samples, 0.0f);
+        highBand_.assign(samples, 0.0f);
+        airBand_.assign(samples, 0.0f);
+    }
+
     // Procesa un bloque interleaved in-place. Pensado para bloques de
     // 64-128 frames (1.3-2.6ms a 48kHz) para cumplir el objetivo <5ms.
+    //
+    // NUNCA reserva memoria: se ejecuta en el hilo de audio y, dentro de un
+    // APO, corre en audiodg.exe bajo tiempo real estricto, donde reservar
+    // (o cualquier llamada bloqueante) puede provocar cortes. Si llega un
+    // bloque mayor que lo reservado, se procesa lo que cabe en vez de
+    // crecer el buffer; llama a reserve() con el tamaño máximo real antes
+    // de empezar a procesar.
     void process(float* interleaved, size_t numFrames) {
         if (bypass_) return;
 
         applyPendingParams();
 
+        const size_t capacityFrames = numChannels_ > 0 ? lowBand_.size() / numChannels_ : 0;
+        if (numFrames > capacityFrames) numFrames = capacityFrames;
+        if (numFrames == 0) return;
+
         const size_t total = numFrames * numChannels_;
-        if (lowBand_.size() < total) {
-            lowBand_.resize(total, 0.0f);
-            highBand_.resize(total, 0.0f);
-            airBand_.resize(total, 0.0f);
-        }
 
         // 1) HPF + doble crossover complementario, por canal, muestra a
         //    muestra. Tres bandas: graves (vehículos), medios (pasos) y
