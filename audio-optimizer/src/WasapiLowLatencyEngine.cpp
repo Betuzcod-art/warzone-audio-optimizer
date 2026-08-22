@@ -274,34 +274,65 @@ bool WasapiLowLatencyEngine::initRenderClient(std::wstring& outError) {
     }
 
     if (!renderExclusive_) {
-        // Compartido estéreo: WASAPI realiza una única conversión al formato
-        // físico de los auriculares y evita escribir manualmente canales
-        // 5.1/7.1.
-        const DWORD sharedFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-                                  AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
+        // Modo Shared con el período MÍNIMO que el motor de audio permita
+        // (IAudioClient3). Sin esto Windows entrega su período por defecto,
+        // que ronda los 10ms -> ~20ms de buffer, y es la mayor fuente de
+        // latencia que queda en este pipeline.
+        //
+        // IMPORTANTE: InitializeSharedAudioStream NO acepta
+        // AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM (ese flag es solo para
+        // Initialize). Pasarlo hace fallar la llamada y caer al período por
+        // defecto. Tampoco hace falta: esta ruta usa el mix format tal cual,
+        // así que no hay nada que convertir.
         Microsoft::WRL::ComPtr<IAudioClient3> renderClient3;
         UINT32 defaultPeriod = 0;
         UINT32 fundamentalPeriod = 0;
         UINT32 minPeriod = 0;
         UINT32 maxPeriod = 0;
-        const bool supportsSmallPeriod =
-            SUCCEEDED(renderClient_.As(&renderClient3)) &&
-            SUCCEEDED(renderClient3->GetSharedModeEnginePeriod(
-                mixFormat, &defaultPeriod, &fundamentalPeriod,
-                &minPeriod, &maxPeriod));
 
+        const HRESULT queryHr = renderClient_.As(&renderClient3);
+        const HRESULT periodHr = SUCCEEDED(queryHr)
+            ? renderClient3->GetSharedModeEnginePeriod(mixFormat, &defaultPeriod,
+                                                        &fundamentalPeriod, &minPeriod, &maxPeriod)
+            : queryHr;
+        const bool supportsSmallPeriod = SUCCEEDED(periodHr);
+
+        HRESULT smallPeriodHr = E_FAIL;
         if (supportsSmallPeriod) {
             UINT32 period = minPeriod;
             period = ((period + fundamentalPeriod - 1) / fundamentalPeriod) * fundamentalPeriod;
             period = std::min(period, maxPeriod);
-            hr = renderClient3->InitializeSharedAudioStream(
-                sharedFlags, period, mixFormat, nullptr);
+            smallPeriodHr = renderClient3->InitializeSharedAudioStream(
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK, period, mixFormat, nullptr);
+            hr = smallPeriodHr;
         }
-        if (!supportsSmallPeriod || FAILED(hr)) {
-            hr = renderClient_->Initialize(
-                AUDCLNT_SHAREMODE_SHARED, sharedFlags, 0, 0,
-                mixFormat, nullptr);
+
+        if (!supportsSmallPeriod || FAILED(smallPeriodHr)) {
+            // Reintento con el camino clásico. Si InitializeSharedAudioStream
+            // llegó a fallar, hay que recrear el cliente: un Initialize sobre
+            // un IAudioClient que ya falló devuelve AUDCLNT_E_ALREADY_INITIALIZED
+            // o queda en estado inconsistente.
+            if (supportsSmallPeriod) {
+                renderClient_.Reset();
+                renderClient3.Reset();
+                hr = renderDevice_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                              reinterpret_cast<void**>(renderClient_.GetAddressOf()));
+            }
+            if (SUCCEEDED(hr)) {
+                hr = renderClient_->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                    0, 0, mixFormat, nullptr);
+            }
         }
+
+        std::wstringstream diag;
+        diag << L"iac3=" << (SUCCEEDED(queryHr) ? L"si" : L"no")
+             << L" periodHr=0x" << std::hex << periodHr << std::dec
+             << L" min=" << minPeriod << L" def=" << defaultPeriod
+             << L" fund=" << fundamentalPeriod << L" max=" << maxPeriod
+             << L" smallPeriodHr=0x" << std::hex << smallPeriodHr;
+        sharedModeDiag_ = diag.str();
     }
 
     CoTaskMemFree(mixFormat);

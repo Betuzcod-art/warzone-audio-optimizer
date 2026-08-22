@@ -91,6 +91,9 @@ public:
     uint32_t renderContainerBits() const { return renderContainerBits_; }
     bool renderFormatIsFloat() const { return renderFormatIsFloat_; }
     uint32_t renderBufferFrames() const { return renderBufferFrameCount_; }
+    uint32_t captureBufferFrames() const { return captureBufferFrameCount_; }
+    // Traza de la negociación de período en modo Shared (IAudioClient3).
+    const std::wstring& sharedModeDiagnostics() const { return sharedModeDiag_; }
 
     WarzoneAudioChain& dspChain() { return dspChain_; }
 
@@ -130,6 +133,7 @@ private:
     bool renderExclusive_ = false;
     UINT32 renderContainerBits_ = 32;
     bool renderFormatIsFloat_ = true;
+    std::wstring sharedModeDiag_;
 
     std::unique_ptr<InsuredRingBuffer> ringBuffer_;
     WarzoneAudioChain dspChain_;

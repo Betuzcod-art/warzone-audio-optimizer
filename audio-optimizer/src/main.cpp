@@ -804,9 +804,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
                 L" render=" + (state.engine->renderModeExclusive() ? L"EXCLUSIVE" : L"SHARED") +
                 L" format=" + (state.engine->renderFormatIsFloat() ? L"float32" :
                     (L"pcm" + std::to_wstring(state.engine->renderContainerBits()) + L"bit")) +
-                L" bufferFrames=" + std::to_wstring(state.engine->renderBufferFrames()) +
+                L" renderBuf=" + std::to_wstring(state.engine->renderBufferFrames()) +
+                L" captureBuf=" + std::to_wstring(state.engine->captureBufferFrames()) +
                 L" sampleRate=" + std::to_wstring(state.engine->sampleRate()) +
-                L" channels=" + std::to_wstring(state.engine->numChannels()) + L"\r\n";
+                L" channels=" + std::to_wstring(state.engine->numChannels()) + L"\r\n" +
+                L"shared: " + state.engine->sharedModeDiagnostics() + L"\r\n";
             std::string narrow;
             narrow.reserve(line.size());
             for (wchar_t ch : line) narrow.push_back(static_cast<char>(ch));
