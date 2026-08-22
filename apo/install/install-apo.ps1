@@ -38,11 +38,25 @@ $BackupKey  = 'HKLM:\SOFTWARE\WarzoneAudioOptimizer\ApoBackup'
 $RenderRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
 $AudioKey   = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
 
-# Property keys del motor de audio.
-#   ,6 = PKEY_FX_ModeEffectClsid -- el efecto de modo, que se aplica a la
-#        mezcla ya combinada. Es donde queremos insertarnos.
-#   Las ,5 (stream) y ,7 (endpoint) se dejan intactas.
-$PkeyModeEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
+# Slots de efectos del motor de audio, en el orden en que se aplican:
+#   SFX (,5) -> MFX (,6) -> EFX (,7)
+#
+# Muchos dispositivos ya traen efectos del fabricante en SFX y/o MFX -- en un
+# auricular con 7.1 virtual, por ejemplo, ESE es el efecto que crea la
+# virtualizacion espacial. Pisarlo apagaria justo lo que ayuda a ubicar los
+# pasos. Por eso el instalador busca un slot LIBRE (prefiriendo EFX, el mas
+# tardio y el que menos interfiere) y solo propone reemplazar si no queda
+# ninguno.
+$PkeyStreamEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},5'
+$PkeyModeEffect   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
+$PkeyEndpointEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},7'
+
+# Orden de preferencia al buscar hueco: EFX primero (procesa al final, sin
+# estorbar a nadie), luego MFX.
+$SlotPreference = @(
+    @{ Key = $PkeyEndpointEffect; Name = 'EFX (final de la cadena)' },
+    @{ Key = $PkeyModeEffect;     Name = 'MFX (mezcla combinada)' }
+)
 
 # PKEY_AudioEndpoint_Disable_SysFx. Windows la pone a 1 automaticamente si un
 # APO falla al cargar repetidamente (10 veces), y entonces DESACTIVA todos los
@@ -115,22 +129,33 @@ Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
     $friendly = $props.'{a45c254e-df1c-4efd-8020-67d146a850e0},14'
     $name = if ($friendly) { $friendly } elseif ($desc) { $desc } else { $_.PSChildName }
 
-    # Efecto de modo ya registrado por el fabricante, si lo hay: instalarnos
-    # ahi lo REEMPLAZA, asi que hay que avisar antes.
-    $existingMfx = $null
+    # Que slots de efectos estan ocupados, y cual podemos usar sin pisar nada.
     $fxPath = Join-Path $endpointKey 'FxProperties'
-    if (Test-Path $fxPath) {
-        $fx = Get-ItemProperty -Path $fxPath -ErrorAction SilentlyContinue
-        if ($fx -and $fx.PSObject.Properties.Name -contains $PkeyModeEffect) {
-            $existingMfx = $fx.$PkeyModeEffect
-        }
+    $fx = $null
+    if (Test-Path $fxPath) { $fx = Get-ItemProperty -Path $fxPath -ErrorAction SilentlyContinue }
+
+    function Get-SlotValue($props, $key) {
+        if ($props -and $props.PSObject.Properties.Name -contains $key) { return $props.$key }
+        return $null
+    }
+
+    $occupied = @()
+    if (Get-SlotValue $fx $PkeyStreamEffect)   { $occupied += 'SFX' }
+    if (Get-SlotValue $fx $PkeyModeEffect)     { $occupied += 'MFX' }
+    if (Get-SlotValue $fx $PkeyEndpointEffect) { $occupied += 'EFX' }
+
+    $freeSlot = $null
+    foreach ($slot in $SlotPreference) {
+        if (-not (Get-SlotValue $fx $slot.Key)) { $freeSlot = $slot; break }
     }
 
     $devices += [PSCustomObject]@{
-        Name        = $name
-        Guid        = $_.PSChildName
-        Path        = $endpointKey
-        ExistingMfx = $existingMfx
+        Name         = $name
+        Guid         = $_.PSChildName
+        Path         = $endpointKey
+        Occupied     = $occupied
+        FreeSlot     = $freeSlot
+        ExistingInFree = if ($freeSlot) { $null } else { Get-SlotValue $fx $PkeyModeEffect }
     }
 }
 
@@ -145,8 +170,13 @@ for ($i = 0; $i -lt $devices.Count; $i++) {
     Write-Host ("  [{0}] {1}" -f $i, $d.Name) -ForegroundColor White
     # El id corto desempata cuando dos dispositivos comparten nombre.
     Write-Host ("      id: {0}" -f $d.Guid.Substring(1, 8)) -ForegroundColor DarkGray
-    if ($d.ExistingMfx) {
-        Write-Host "      OJO: ya tiene un efecto de fabricante; se reemplazara" -ForegroundColor Yellow
+    if ($d.Occupied.Count -gt 0) {
+        Write-Host ("      efectos del fabricante: {0}" -f ($d.Occupied -join ', ')) -ForegroundColor DarkGray
+    }
+    if ($d.FreeSlot) {
+        Write-Host ("      -> se instalara en {0}, sin tocar lo existente" -f $d.FreeSlot.Name) -ForegroundColor Green
+    } else {
+        Write-Host "      -> sin slots libres: habria que REEMPLAZAR un efecto" -ForegroundColor Yellow
     }
 }
 Write-Host ''
@@ -163,12 +193,29 @@ if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 0 -or $index -ge $
 $device = $devices[$index]
 Write-Ok "Seleccionado: $($device.Name)"
 
-if ($device.ExistingMfx) {
+# Decidir en que slot entramos.
+if ($device.FreeSlot) {
+    $targetSlotKey = $device.FreeSlot.Key
+    $targetSlotName = $device.FreeSlot.Name
+    $replacedValue = $null
+    Write-Ok "Hay un slot libre: $targetSlotName"
+    if ($device.Occupied.Count -gt 0) {
+        Write-Ok "Los efectos del fabricante ($($device.Occupied -join ', ')) se conservan intactos"
+    }
+} else {
+    # Sin hueco: reemplazar MFX es la opcion menos mala, pero hay que avisar
+    # de que se apaga un efecto del fabricante mientras el APO este puesto.
+    $targetSlotKey = $PkeyModeEffect
+    $targetSlotName = 'MFX (reemplazando el existente)'
+    $replacedValue = $device.ExistingInFree
     Write-Host ''
-    Write-Warn "Este dispositivo ya tiene el efecto $($device.ExistingMfx)"
-    Write-Warn 'Instalar aqui lo desactiva mientras el APO este puesto.'
+    Write-Warn 'Este dispositivo no tiene ningun slot de efectos libre.'
+    Write-Warn "Habria que reemplazar el efecto de modo: $replacedValue"
+    Write-Warn 'Si ese efecto es un virtualizador espacial (7.1 virtual, Atmos,'
+    Write-Warn 'etc.), lo perderias mientras el APO este instalado -- y es justo'
+    Write-Warn 'lo que ayuda a ubicar los pasos. Piensalo antes de aceptar.'
     Write-Warn 'El desinstalador lo restaura tal cual.'
-    $ok = Read-Host 'Continuar de todas formas? (S/N)'
+    $ok = Read-Host 'Reemplazarlo de todas formas? (S/N)'
     if ($ok -notmatch '^[SsYy]') {
         Write-Host 'Cancelado. No se ha modificado nada.' -ForegroundColor Red
         exit 1
@@ -189,13 +236,15 @@ $hadFxKey = Test-Path $fxPath
 Set-ItemProperty -Path $BackupKey -Name 'EndpointGuid' -Value $device.Guid
 Set-ItemProperty -Path $BackupKey -Name 'EndpointName' -Value $device.Name
 Set-ItemProperty -Path $BackupKey -Name 'HadFxKey' -Value ([int]$hadFxKey)
+# Guardar EN QUE slot entramos: el desinstalador debe limpiar ese y no otro.
+Set-ItemProperty -Path $BackupKey -Name 'UsedSlotKey' -Value $targetSlotKey
 
-if ($null -ne $device.ExistingMfx) {
-    Set-ItemProperty -Path $BackupKey -Name 'OriginalModeEffect' -Value $device.ExistingMfx
-    Write-Ok "Efecto de modo original guardado: $($device.ExistingMfx)"
+if ($null -ne $replacedValue) {
+    Set-ItemProperty -Path $BackupKey -Name 'ReplacedValue' -Value $replacedValue
+    Write-Ok "Efecto reemplazado guardado para restaurar: $replacedValue"
 } else {
-    Remove-ItemProperty -Path $BackupKey -Name 'OriginalModeEffect' -ErrorAction SilentlyContinue
-    Write-Ok 'El dispositivo no tenia efecto de modo previo'
+    Remove-ItemProperty -Path $BackupKey -Name 'ReplacedValue' -ErrorAction SilentlyContinue
+    Write-Ok 'No se reemplaza ningun efecto (entramos en un slot libre)'
 }
 
 $originalDisable = $null
@@ -236,8 +285,8 @@ Set-ItemProperty -Path $AudioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type 
 Write-Warn 'DisableProtectedAudioDG = 1 (verificacion de firma de APOs desactivada)'
 
 if (-not $hadFxKey) { New-Item -Path $fxPath -Force | Out-Null }
-Set-ItemProperty -Path $fxPath -Name $PkeyModeEffect -Value $ApoClsid -Type String
-Write-Ok "APO asociado a $($device.Name)"
+Set-ItemProperty -Path $fxPath -Name $targetSlotKey -Value $ApoClsid -Type String
+Write-Ok "APO asociado a $($device.Name) en $targetSlotName"
 
 # Si una instalacion anterior dejo los efectos desactivados, limpiarlo: si no,
 # el APO cargaria bien pero Windows lo ignoraria igualmente.

@@ -37,7 +37,13 @@ $BackupKey  = 'HKLM:\SOFTWARE\WarzoneAudioOptimizer\ApoBackup'
 $RenderRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
 $AudioKey   = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
 
-$PkeyModeEffect   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
+# Los tres slots donde el APO pudo instalarse. El instalador elige el que
+# estuviera libre, asi que hay que revisarlos todos.
+$PkeyStreamEffect   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},5'
+$PkeyModeEffect     = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
+$PkeyEndpointEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},7'
+$AllSlots = @($PkeyStreamEffect, $PkeyModeEffect, $PkeyEndpointEffect)
+
 $PkeyDisableSysFx = '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},5'
 
 function Write-Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
@@ -63,13 +69,22 @@ if ($backup -and $backup.EndpointGuid) {
     $fxPath = Join-Path $endpointPath 'FxProperties'
     $touchedPaths += $endpointPath
 
-    if ($backup.PSObject.Properties.Name -contains 'OriginalModeEffect') {
-        Set-ItemProperty -Path $fxPath -Name $PkeyModeEffect `
-                         -Value $backup.OriginalModeEffect -Type String -ErrorAction SilentlyContinue
-        Write-Ok "Efecto de modo original restaurado: $($backup.OriginalModeEffect)"
+    # El instalador guardo en que slot entro. Si el backup es de una version
+    # anterior y no lo tiene, caemos a MFX, que es donde instalaba entonces.
+    $usedSlot = $PkeyModeEffect
+    if ($backup.PSObject.Properties.Name -contains 'UsedSlotKey') {
+        $usedSlot = $backup.UsedSlotKey
+    }
+
+    if ($backup.PSObject.Properties.Name -contains 'ReplacedValue') {
+        # Habiamos pisado un efecto del fabricante: devolverlo a su sitio.
+        Set-ItemProperty -Path $fxPath -Name $usedSlot `
+                         -Value $backup.ReplacedValue -Type String -ErrorAction SilentlyContinue
+        Write-Ok "Efecto original del fabricante restaurado: $($backup.ReplacedValue)"
     } else {
-        Remove-ItemProperty -Path $fxPath -Name $PkeyModeEffect -ErrorAction SilentlyContinue
-        Write-Ok 'Asociacion del APO eliminada (no habia efecto previo)'
+        # Entramos en un slot que estaba libre: basta con vaciarlo.
+        Remove-ItemProperty -Path $fxPath -Name $usedSlot -ErrorAction SilentlyContinue
+        Write-Ok 'Asociacion del APO eliminada (el slot estaba libre al instalar)'
     }
 
     # Si la clave FxProperties no existia antes, la quitamos si quedo vacia.
@@ -81,14 +96,19 @@ if ($backup -and $backup.EndpointGuid) {
     }
 } else {
     Write-Warn 'No se encontro backup. Barriendo todos los dispositivos...'
+    # Sin backup no sabemos en que slot entramos, asi que revisamos los tres.
+    # El filtro por CLSID es lo que garantiza no tocar efectos de terceros.
     Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
         $fxPath = Join-Path $_.PSPath 'FxProperties'
         $props = Get-ItemProperty -Path $fxPath -ErrorAction SilentlyContinue
-        if ($props -and $props.PSObject.Properties.Name -contains $PkeyModeEffect) {
-            if ($props.$PkeyModeEffect -eq $ApoClsid) {
-                Remove-ItemProperty -Path $fxPath -Name $PkeyModeEffect -ErrorAction SilentlyContinue
-                Write-Ok "Asociacion eliminada de $($_.PSChildName)"
-                $script:touchedPaths += $_.PSPath
+        if (-not $props) { return }
+        foreach ($slot in $AllSlots) {
+            if ($props.PSObject.Properties.Name -contains $slot) {
+                if ($props.$slot -eq $ApoClsid) {
+                    Remove-ItemProperty -Path $fxPath -Name $slot -ErrorAction SilentlyContinue
+                    Write-Ok "Asociacion eliminada de $($_.PSChildName)"
+                    $script:touchedPaths += $_.PSPath
+                }
             }
         }
     }
@@ -181,8 +201,11 @@ Write-Step 'Verificando...'
 $leftovers = 0
 Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
     $props = Get-ItemProperty -Path (Join-Path $_.PSPath 'FxProperties') -ErrorAction SilentlyContinue
-    if ($props -and $props.PSObject.Properties.Name -contains $PkeyModeEffect) {
-        if ($props.$PkeyModeEffect -eq $ApoClsid) { $script:leftovers++ }
+    if (-not $props) { return }
+    foreach ($slot in $AllSlots) {
+        if ($props.PSObject.Properties.Name -contains $slot) {
+            if ($props.$slot -eq $ApoClsid) { $script:leftovers++ }
+        }
     }
 }
 
