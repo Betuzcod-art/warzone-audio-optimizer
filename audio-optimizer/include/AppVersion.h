@@ -9,7 +9,7 @@
 
 namespace audiopt {
 
-constexpr wchar_t kAppVersion[] = L"1.0.0";
+constexpr wchar_t kAppVersion[] = L"1.1.0";
 
 // Página de descarga / changelog público.
 constexpr wchar_t kDownloadPageUrl[] =

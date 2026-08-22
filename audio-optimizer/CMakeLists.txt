@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(WarzoneAudioOptimizer LANGUAGES CXX)
 
+# Esto es una app de audio en tiempo real: un build sin optimizar (Debug,
+# el default de CMake si no se especifica nada) puede hacer que el hilo de
+# render no termine de procesar un bloque dentro de su ventana de ~1-2ms y
+# genere underruns audibles -- ya nos pasó. Si el usuario no pide Debug
+# explícitamente, compilamos en Release.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")

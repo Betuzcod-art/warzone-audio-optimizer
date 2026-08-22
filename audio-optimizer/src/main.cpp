@@ -1,6 +1,7 @@
 #include "WasapiLowLatencyEngine.h"
 #include "AppVersion.h"
 #include <Windows.h>
+#include <windowsx.h>
 #include <shellapi.h>
 #include <winhttp.h>
 #include <memory>
@@ -36,6 +37,80 @@ const COLORREF kWarning = RGB(246, 187, 78);
 // sesión -- comparamos contra una línea base tomada al final de esa ventana.
 constexpr ULONGLONG kHealthGraceMs = 1500;
 
+// -----------------------------------------------------------------------------
+// Sliders de ajuste manual. Son dibujados a mano (no controles nativos) para
+// que encajen con el resto de la UI oscura. Cada uno mapea su posición 0..1 a
+// un rango de valor real y lo empuja a la cadena DSP en vivo.
+// -----------------------------------------------------------------------------
+enum SliderId {
+    kSliderFootsteps = 0,
+    kSliderVehicles,
+    kSliderAir,
+    kSliderBandStart,
+    kSliderBandEnd,
+    kSliderStereoWidth,
+    kSliderVolume,
+    kSliderCount
+};
+
+enum SliderFormat {
+    kFormatDb = 0,
+    kFormatPercent,
+    kFormatHz,
+};
+
+struct SliderSpec {
+    const wchar_t* label;
+    const wchar_t* hint;
+    // Clave estable en el archivo de ajustes. NO renombrar sin migrar: si
+    // cambia, los ajustes guardados del usuario se pierden silenciosamente.
+    const wchar_t* settingsKey;
+    float minValue;
+    float maxValue;
+    float defaultValue;
+    SliderFormat format;
+    // Escala logarítmica: obligatoria para frecuencias. El oído percibe la
+    // frecuencia de forma logarítmica, así que un slider lineal gastaría
+    // medio recorrido entre 5k y 10k (que apenas se distinguen) y dejaría
+    // sin resolución la zona grave, donde cada 100Hz sí importan.
+    bool logarithmic;
+};
+
+// Nota sobre "MOTORES/EXPLOSIONES": el valor es el umbral del compresor de la
+// banda baja, y va al revés que la intuición (más negativo = agacha más). Por
+// eso el slider se dibuja invertido: a la derecha = más reducción.
+const SliderSpec kSliders[kSliderCount] = {
+    {L"REALCE DE PASOS",        L"Sube pasos, recargas y ropa",     L"footstepBoostDb",
+      0.0f,  14.0f,  7.0f,  kFormatDb, false},
+    {L"REDUCIR MOTORES/BOMBAS", L"Agacha vehiculos y explosiones",  L"vehicleThresholdDb",
+    -15.0f, -45.0f, -40.0f, kFormatDb, false},
+    {L"REDUCIR BRILLO/CAJAS",   L"Baja el tintineo metalico agudo", L"airGainDb",
+      0.0f, -15.0f,  -4.0f, kFormatDb, false},
+    {L"BANDA PASOS: EMPIEZA",   L"Debajo = motores y explosiones",  L"lowCrossoverHz",
+    200.0f, 1500.0f, 700.0f, kFormatHz, true},
+    {L"BANDA PASOS: TERMINA",   L"Encima = brillo, cajas, metal",   L"airCrossoverHz",
+   3000.0f, 12000.0f, 5000.0f, kFormatHz, true},
+    {L"AMPLITUD ESTEREO",       L"Direccion mas nitida",            L"stereoWidth",
+      1.0f,   2.0f,  1.3f,  kFormatPercent, false},
+    {L"VOLUMEN DE SALIDA",      L"Ganancia final",                  L"outputTrimDb",
+    -12.0f,   6.0f,  0.0f,  kFormatDb, false},
+};
+
+constexpr int kSliderX = 44;
+constexpr int kSliderWidth = 512;
+constexpr int kSliderFirstY = 322;
+constexpr int kSliderSpacing = 58;
+constexpr int kSliderTrackHeight = 6;
+constexpr int kSliderThumbWidth = 12;
+constexpr int kSliderThumbHeight = 20;
+// Alto de la zona sensible al mouse alrededor del track (más generosa que el
+// track dibujado, para que no haya que apuntar al pixel).
+constexpr int kSliderHitPadding = 12;
+
+// Los botones van debajo de la última fila de sliders.
+constexpr int kButtonsY = kSliderFirstY + kSliderCount * kSliderSpacing + 12;
+constexpr int kWindowHeight = kButtonsY + 66 + 32 + 56;
+
 struct AppState {
     std::unique_ptr<audiopt::WasapiLowLatencyEngine> engine;
     HWND toggleButton = nullptr;
@@ -46,7 +121,124 @@ struct AppState {
     uint64_t insuredBaseline = 0;
     uint64_t resyncBaseline = 0;
     bool checkingUpdate = false;
+    float sliderValues[kSliderCount]{};
+    int draggingSlider = -1;
 };
+
+// Y del track de un slider dado.
+int sliderTrackY(int index) {
+    return kSliderFirstY + index * kSliderSpacing + 26;
+}
+
+// Convierte un valor real a posición normalizada 0..1 dentro de su rango.
+float valueToNorm(const SliderSpec& spec, float value) {
+    if (spec.logarithmic) {
+        // Requiere min/max > 0, garantizado para los sliders de frecuencia.
+        const float ratio = spec.maxValue / spec.minValue;
+        if (ratio <= 1.0f) return 0.0f;
+        return std::clamp(std::log(value / spec.minValue) / std::log(ratio), 0.0f, 1.0f);
+    }
+    const float span = spec.maxValue - spec.minValue;
+    if (span == 0.0f) return 0.0f;
+    return std::clamp((value - spec.minValue) / span, 0.0f, 1.0f);
+}
+
+float normToValue(const SliderSpec& spec, float norm) {
+    const float clamped = std::clamp(norm, 0.0f, 1.0f);
+    if (spec.logarithmic) {
+        return spec.minValue * std::pow(spec.maxValue / spec.minValue, clamped);
+    }
+    return spec.minValue + clamped * (spec.maxValue - spec.minValue);
+}
+
+// -----------------------------------------------------------------------------
+// Persistencia de ajustes: %APPDATA%\WarzoneAudioOptimizer\settings.ini
+// Se usa la API de INI de Win32 en vez de un formato propio para no tener que
+// escribir (ni depurar) un parser. Si el archivo no existe o una clave está
+// corrupta, cada slider cae a su valor por defecto -- nunca a un valor basura.
+// -----------------------------------------------------------------------------
+constexpr wchar_t kSettingsSection[] = L"Ajustes";
+
+std::wstring settingsFilePath(bool createDirectory) {
+    wchar_t appData[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"APPDATA", appData,
+                                                  static_cast<DWORD>(std::size(appData)));
+    if (length == 0 || length >= std::size(appData)) return L"";
+
+    const std::wstring directory = std::wstring(appData) + L"\\WarzoneAudioOptimizer";
+    if (createDirectory) {
+        // Falla silenciosamente si ya existe, que es el caso normal.
+        CreateDirectoryW(directory.c_str(), nullptr);
+    }
+    return directory + L"\\settings.ini";
+}
+
+void saveSettings(const AppState& state) {
+    const std::wstring path = settingsFilePath(/*createDirectory*/ true);
+    if (path.empty()) return;
+
+    for (int i = 0; i < kSliderCount; ++i) {
+        wchar_t buffer[64]{};
+        swprintf(buffer, std::size(buffer), L"%.4f", state.sliderValues[i]);
+        WritePrivateProfileStringW(kSettingsSection, kSliders[i].settingsKey,
+                                    buffer, path.c_str());
+    }
+}
+
+void loadSettings(AppState& state) {
+    const std::wstring path = settingsFilePath(/*createDirectory*/ false);
+
+    for (int i = 0; i < kSliderCount; ++i) {
+        const SliderSpec& spec = kSliders[i];
+        float value = spec.defaultValue;
+
+        if (!path.empty()) {
+            wchar_t buffer[64]{};
+            // El sentinel vacío distingue "clave ausente" de "clave presente
+            // con valor 0", que es legítimo para varios de estos sliders.
+            GetPrivateProfileStringW(kSettingsSection, spec.settingsKey, L"",
+                                      buffer, static_cast<DWORD>(std::size(buffer)),
+                                      path.c_str());
+            if (buffer[0] != L'\0') {
+                wchar_t* end = nullptr;
+                const double parsed = wcstod(buffer, &end);
+                // Solo aceptamos el valor si la cadena entera era numérica.
+                if (end && *end == L'\0') {
+                    // Clamp por si el rango del slider cambió entre versiones:
+                    // un ajuste viejo fuera de rango no debe colarse al DSP.
+                    const float low = std::min(spec.minValue, spec.maxValue);
+                    const float high = std::max(spec.minValue, spec.maxValue);
+                    value = std::clamp(static_cast<float>(parsed), low, high);
+                }
+            }
+        }
+
+        state.sliderValues[i] = value;
+    }
+}
+
+std::wstring formatSliderValue(const SliderSpec& spec, float value) {
+    wchar_t buffer[64]{};
+    switch (spec.format) {
+        case kFormatPercent:
+            swprintf(buffer, std::size(buffer), L"%d%%",
+                     static_cast<int>(value * 100.0f + 0.5f));
+            break;
+        case kFormatHz:
+            if (value >= 1000.0f) {
+                swprintf(buffer, std::size(buffer), L"%.2f kHz", value / 1000.0f);
+            } else {
+                swprintf(buffer, std::size(buffer), L"%d Hz",
+                         static_cast<int>(value + 0.5f));
+            }
+            break;
+        case kFormatDb:
+        default:
+            swprintf(buffer, std::size(buffer), L"%+.1f dB", value);
+            break;
+    }
+    return buffer;
+}
 
 AppState* getState(HWND window) {
     return reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -70,6 +262,94 @@ void drawMetric(HDC dc, const wchar_t* label, const std::wstring& value,
                 int x, int y) {
     drawText(dc, label, x, y, 12, kMuted);
     drawText(dc, value.c_str(), x, y + 22, 18, kText, true);
+}
+
+void drawTextRight(HDC dc, const wchar_t* text, int right, int y, int size,
+                   COLORREF color, bool bold = false) {
+    HFONT font = CreateFontW(
+        -size, 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    const HFONT previous = static_cast<HFONT>(SelectObject(dc, font));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    RECT bounds{right - 200, y, right, y + size + 8};
+    DrawTextW(dc, text, -1, &bounds, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+    SelectObject(dc, previous);
+    DeleteObject(font);
+}
+
+void fillRoundedBar(HDC dc, int left, int top, int right, int bottom, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    RECT rect{left, top, right, bottom};
+    FillRect(dc, &rect, brush);
+    DeleteObject(brush);
+}
+
+// Empuja el valor de un slider a la cadena DSP. Los setters de la cadena son
+// seguros de llamar desde el hilo de UI mientras el audio corre (guardan el
+// valor en un atómico que el hilo de audio aplica en el siguiente bloque).
+void pushSliderToDsp(AppState& state, int index) {
+    if (!state.engine) return;
+    auto& chain = state.engine->dspChain();
+    const float value = state.sliderValues[index];
+    switch (index) {
+        case kSliderFootsteps: chain.setFootstepBoostDb(value); break;
+        case kSliderVehicles:  chain.setVehicleThresholdDb(value); break;
+        case kSliderAir:       chain.setAirGainDb(value); break;
+        case kSliderBandStart: chain.setLowCrossoverHz(value); break;
+        case kSliderBandEnd:   chain.setAirCrossoverHz(value); break;
+        case kSliderStereoWidth: chain.setStereoWidth(value); break;
+        case kSliderVolume:    chain.setOutputTrimDb(value); break;
+        default: break;
+    }
+}
+
+void drawSliders(HDC dc, const AppState& state) {
+    for (int i = 0; i < kSliderCount; ++i) {
+        const SliderSpec& spec = kSliders[i];
+        const int labelY = kSliderFirstY + i * kSliderSpacing;
+        const int trackY = sliderTrackY(i);
+
+        drawText(dc, spec.label, kSliderX, labelY, 12, kText, true);
+        drawTextRight(dc, formatSliderValue(spec, state.sliderValues[i]).c_str(),
+                      kSliderX + kSliderWidth, labelY - 1, 13, kAccent, true);
+        drawText(dc, spec.hint, kSliderX, labelY + 14, 11, kMuted);
+
+        // Track de fondo + porción "llena" hasta el thumb.
+        const float norm = valueToNorm(spec, state.sliderValues[i]);
+        const int thumbX = kSliderX + static_cast<int>(norm * static_cast<float>(kSliderWidth));
+        fillRoundedBar(dc, kSliderX, trackY, kSliderX + kSliderWidth,
+                       trackY + kSliderTrackHeight, RGB(38, 46, 58));
+        fillRoundedBar(dc, kSliderX, trackY, thumbX, trackY + kSliderTrackHeight, kAccent);
+
+        // Thumb.
+        const int thumbLeft = std::clamp(thumbX - kSliderThumbWidth / 2,
+                                          kSliderX, kSliderX + kSliderWidth - kSliderThumbWidth);
+        const int thumbTop = trackY + kSliderTrackHeight / 2 - kSliderThumbHeight / 2;
+        fillRoundedBar(dc, thumbLeft, thumbTop, thumbLeft + kSliderThumbWidth,
+                       thumbTop + kSliderThumbHeight,
+                       state.draggingSlider == i ? kText : RGB(190, 214, 236));
+    }
+}
+
+// Devuelve el índice del slider bajo el punto dado, o -1.
+int sliderHitTest(int x, int y) {
+    for (int i = 0; i < kSliderCount; ++i) {
+        const int trackY = sliderTrackY(i);
+        if (x >= kSliderX - kSliderThumbWidth && x <= kSliderX + kSliderWidth + kSliderThumbWidth &&
+            y >= trackY - kSliderHitPadding &&
+            y <= trackY + kSliderTrackHeight + kSliderHitPadding) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void updateSliderFromMouse(AppState& state, int index, int mouseX) {
+    const float norm = static_cast<float>(mouseX - kSliderX) / static_cast<float>(kSliderWidth);
+    state.sliderValues[index] = normToValue(kSliders[index], norm);
+    pushSliderToDsp(state, index);
 }
 
 // -----------------------------------------------------------------------------
@@ -296,6 +576,8 @@ void paintWindow(HWND window, HDC dc) {
         (state->engine->renderModeExclusive() ? L"EXCLUSIVE" : L"SHARED") +
         L"  |  EQ pasos multibanda + control de motores/explosiones";
     drawText(dc, modeLine.c_str(), 44, 282, 12, kMuted);
+
+    drawSliders(dc, *state);
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -312,17 +594,52 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             state->toggleButton = CreateWindowExW(
                 0, L"BUTTON", L"ACTIVAR PROCESAMIENTO",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                36, 326, 548, 54, window,
+                36, kButtonsY, 548, 54, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kToggleControl)),
                 GetModuleHandleW(nullptr), nullptr);
             state->updateButton = CreateWindowExW(
                 0, L"BUTTON", L"BUSCAR ACTUALIZACIONES",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                36, 392, 548, 32, window,
+                36, kButtonsY + 66, 548, 32, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateCheckControl)),
                 GetModuleHandleW(nullptr), nullptr);
             SetTimer(window, kRefreshTimer, 1000, nullptr);
             return 0;
+
+        case WM_LBUTTONDOWN: {
+            if (!state) break;
+            const int mouseX = GET_X_LPARAM(lParam);
+            const int mouseY = GET_Y_LPARAM(lParam);
+            const int hit = sliderHitTest(mouseX, mouseY);
+            if (hit >= 0) {
+                state->draggingSlider = hit;
+                SetCapture(window);
+                updateSliderFromMouse(*state, hit, mouseX);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_MOUSEMOVE:
+            if (state && state->draggingSlider >= 0) {
+                updateSliderFromMouse(*state, state->draggingSlider, GET_X_LPARAM(lParam));
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+            break;
+
+        case WM_LBUTTONUP:
+            if (state && state->draggingSlider >= 0) {
+                state->draggingSlider = -1;
+                ReleaseCapture();
+                // Guardamos al soltar (no en cada WM_MOUSEMOVE, que serían
+                // cientos de escrituras a disco por arrastre).
+                saveSettings(*state);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+            break;
 
         case WM_COMMAND:
             if (LOWORD(wParam) == kToggleControl && HIWORD(wParam) == BN_CLICKED) {
@@ -432,7 +749,10 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         case WM_DESTROY:
             KillTimer(window, kRefreshTimer);
-            if (state && state->engine) state->engine->stop();
+            if (state) {
+                saveSettings(*state);
+                if (state->engine) state->engine->stop();
+            }
             PostQuitMessage(0);
             return 0;
     }
@@ -461,8 +781,40 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         showInitializationError(nullptr, error);
         return 1;
     }
-    state.engine->dspChain().setOutputTrimDb(-3.0f);
     state.engine->dspChain().setBypass(false);
+
+    // Restaura los ajustes guardados (o los valores por defecto si es la
+    // primera vez) y empújalos a la cadena para que UI y DSP digan
+    // exactamente lo mismo desde el primer frame.
+    loadSettings(state);
+    for (int i = 0; i < kSliderCount; ++i) {
+        pushSliderToDsp(state, i);
+    }
+
+    // Log de diagnóstico: qué modo de render quedó activo, sample rate y
+    // canales reales. Para no depender de leer letra chica en pantalla.
+    {
+        wchar_t tempPath[MAX_PATH]{};
+        GetTempPathW(static_cast<DWORD>(std::size(tempPath)), tempPath);
+        const std::wstring logPath = std::wstring(tempPath) + L"WarzoneAudioOptimizer_diag.log";
+        HANDLE logFile = CreateFileW(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (logFile != INVALID_HANDLE_VALUE) {
+            const std::wstring line = std::wstring(L"version=") + kAppVersion +
+                L" render=" + (state.engine->renderModeExclusive() ? L"EXCLUSIVE" : L"SHARED") +
+                L" format=" + (state.engine->renderFormatIsFloat() ? L"float32" :
+                    (L"pcm" + std::to_wstring(state.engine->renderContainerBits()) + L"bit")) +
+                L" bufferFrames=" + std::to_wstring(state.engine->renderBufferFrames()) +
+                L" sampleRate=" + std::to_wstring(state.engine->sampleRate()) +
+                L" channels=" + std::to_wstring(state.engine->numChannels()) + L"\r\n";
+            std::string narrow;
+            narrow.reserve(line.size());
+            for (wchar_t ch : line) narrow.push_back(static_cast<char>(ch));
+            DWORD written = 0;
+            WriteFile(logFile, narrow.c_str(), static_cast<DWORD>(narrow.size()), &written, nullptr);
+            CloseHandle(logFile);
+        }
+    }
 
     WNDCLASSEXW windowClass{sizeof(WNDCLASSEXW)};
     windowClass.hInstance = instance;
@@ -476,7 +828,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     HWND window = CreateWindowExW(
         0, kWindowClass, L"Warzone Audio Optimizer",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 620, 480,
+        CW_USEDEFAULT, CW_USEDEFAULT, 620, kWindowHeight,
         nullptr, nullptr, instance, &state);
     if (!window) return 1;
 

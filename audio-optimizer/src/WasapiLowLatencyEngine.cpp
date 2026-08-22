@@ -63,6 +63,32 @@ namespace {
         }
         return false;
     }
+
+    // Construye un candidato PCM entero (misma frecuencia/canales/máscara
+    // que `reference`) para probar en modo Exclusive. Muchos drivers
+    // Realtek con el driver genérico de Windows rechazan el mix format
+    // float de 32 bits en Exclusive pero sí aceptan PCM entero -- por eso
+    // probamos varias profundidades de bits en vez de rendirnos al primer
+    // rechazo.
+    WAVEFORMATEXTENSIBLE buildPcmCandidate(const WAVEFORMATEX* reference,
+                                            UINT32 validBits, UINT32 containerBits) {
+        WAVEFORMATEXTENSIBLE fmt{};
+        fmt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        fmt.Format.nChannels = reference->nChannels;
+        fmt.Format.nSamplesPerSec = reference->nSamplesPerSec;
+        fmt.Format.wBitsPerSample = static_cast<WORD>(containerBits);
+        fmt.Format.nBlockAlign = static_cast<WORD>(fmt.Format.nChannels * (containerBits / 8));
+        fmt.Format.nAvgBytesPerSec = fmt.Format.nSamplesPerSec * fmt.Format.nBlockAlign;
+        fmt.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+        fmt.Samples.wValidBitsPerSample = static_cast<WORD>(validBits);
+        fmt.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+        fmt.dwChannelMask = 0;
+        if (reference->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            fmt.dwChannelMask =
+                reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(reference)->dwChannelMask;
+        }
+        return fmt;
+    }
 }
 
 WasapiLowLatencyEngine::WasapiLowLatencyEngine() {
@@ -160,40 +186,78 @@ bool WasapiLowLatencyEngine::initRenderClient(std::wstring& outError) {
         // que WASAPI adapte la salida al número de canales físico del equipo.
         config_.numChannels = 2;
 
-    // Intentamos primero modo EXCLUSIVE: evita por completo el mezclador de
-    // audio compartido de Windows (audio engine / APOs de sistema), que por
-    // sí solo añade varios ms de más -- es la mayor fuente de latencia que
-    // SÍ podemos recortar desde aquí sin depender de sustituir VB-CABLE. Es
-    // sensible al driver/formato: si el dispositivo físico no acepta el mix
-    // format en Exclusive, caemos de forma transparente al modo Shared de
-    // siempre (con período mínimo vía IAudioClient3 si el driver lo soporta).
+    // Intentamos modo EXCLUSIVE SOLO si el caller lo pidió explícitamente
+    // (config_.allowExclusiveRender). Evita por completo el mezclador de
+    // audio compartido de Windows -- menos latencia -- pero por diseño de
+    // la API BLOQUEA el dispositivo físico para cualquier otra app mientras
+    // esté activo (Discord, sonidos de Windows, etc. se quedan mudos). Para
+    // el uso normal (de fondo, con Discord abierto) eso no vale la pena, así
+    // que por defecto nos quedamos en Shared.
+    //
+    // El mix format (float 32-bit) que se prueba primero es lo que el
+    // driver reporta como SU formato preferido en modo Shared -- pero
+    // muchos drivers Realtek con el driver genérico de Windows lo rechazan
+    // en Exclusive y solo aceptan PCM entero. Por eso probamos una lista de
+    // candidatos (float, luego PCM 24/32, 24/24, 16/16) en vez de rendirnos
+    // al primer rechazo; si NINGUNO es aceptado, caemos de forma
+    // transparente al modo Shared de siempre.
     renderExclusive_ = false;
-    hr = renderClient_->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, mixFormat, nullptr);
-    if (SUCCEEDED(hr)) {
+    struct RenderFormatCandidate {
+        const WAVEFORMATEX* format;
+        UINT32 containerBits;
+        bool isFloat;
+    };
+    WAVEFORMATEXTENSIBLE pcm24in32 = buildPcmCandidate(mixFormat, 24, 32);
+    WAVEFORMATEXTENSIBLE pcm24in24 = buildPcmCandidate(mixFormat, 24, 24);
+    WAVEFORMATEXTENSIBLE pcm16in16 = buildPcmCandidate(mixFormat, 16, 16);
+    const RenderFormatCandidate candidates[] = {
+        {mixFormat, mixFormat->wBitsPerSample, true},
+        {reinterpret_cast<const WAVEFORMATEX*>(&pcm24in32), 32, false},
+        {reinterpret_cast<const WAVEFORMATEX*>(&pcm24in24), 24, false},
+        {reinterpret_cast<const WAVEFORMATEX*>(&pcm16in16), 16, false},
+    };
+
+    for (const auto& candidate : candidates) {
+        if (!config_.allowExclusiveRender) break;
+        hr = renderClient_->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, candidate.format, nullptr);
+        if (FAILED(hr)) continue;
+
         REFERENCE_TIME defaultPeriod = 0;
         REFERENCE_TIME minimumPeriod = 0;
-        if (SUCCEEDED(renderClient_->GetDevicePeriod(&defaultPeriod, &minimumPeriod))) {
-            const DWORD exclusiveFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-            hr = renderClient_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, exclusiveFlags,
-                                            minimumPeriod, minimumPeriod, mixFormat, nullptr);
-            if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
-                // WASAPI exige recrear el IAudioClient tras este error
-                // específico antes de reintentar con el tamaño alineado.
-                UINT32 alignedFrames = 0;
-                renderClient_->GetBufferSize(&alignedFrames);
-                renderClient_.Reset();
-                hr = renderDevice_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                              reinterpret_cast<void**>(renderClient_.GetAddressOf()));
-                if (SUCCEEDED(hr)) {
-                    const REFERENCE_TIME alignedPeriod = static_cast<REFERENCE_TIME>(
-                        (10000000.0 * alignedFrames) / mixFormat->nSamplesPerSec + 0.5);
-                    hr = renderClient_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, exclusiveFlags,
-                                                    alignedPeriod, alignedPeriod, mixFormat, nullptr);
-                }
+        if (FAILED(renderClient_->GetDevicePeriod(&defaultPeriod, &minimumPeriod))) continue;
+
+        const DWORD exclusiveFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        hr = renderClient_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, exclusiveFlags,
+                                        minimumPeriod, minimumPeriod, candidate.format, nullptr);
+        if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
+            // WASAPI exige recrear el IAudioClient tras este error
+            // específico antes de reintentar con el tamaño alineado.
+            UINT32 alignedFrames = 0;
+            renderClient_->GetBufferSize(&alignedFrames);
+            renderClient_.Reset();
+            hr = renderDevice_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                          reinterpret_cast<void**>(renderClient_.GetAddressOf()));
+            if (SUCCEEDED(hr)) {
+                const REFERENCE_TIME alignedPeriod = static_cast<REFERENCE_TIME>(
+                    (10000000.0 * alignedFrames) / candidate.format->nSamplesPerSec + 0.5);
+                hr = renderClient_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, exclusiveFlags,
+                                                alignedPeriod, alignedPeriod, candidate.format, nullptr);
             }
-            renderExclusive_ = SUCCEEDED(hr);
-        } else {
-            hr = E_FAIL;
+        }
+
+        if (SUCCEEDED(hr)) {
+            renderExclusive_ = true;
+            renderContainerBits_ = candidate.containerBits;
+            renderFormatIsFloat_ = candidate.isFloat;
+            break;
+        }
+
+        if (!renderClient_) {
+            // El reintento de alineación pudo dejar renderClient_ vacío si
+            // la reactivación falló; lo recreamos para poder seguir
+            // probando el resto de candidatos (o caer a Shared al final).
+            renderDevice_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                     reinterpret_cast<void**>(renderClient_.GetAddressOf()));
         }
     }
 
@@ -269,7 +333,7 @@ bool WasapiLowLatencyEngine::initRenderClient(std::wstring& outError) {
     BYTE* prefillData = nullptr;
     if (SUCCEEDED(renderService_->GetBuffer(renderBufferFrameCount_, &prefillData))) {
         std::memset(prefillData, 0, static_cast<size_t>(renderBufferFrameCount_) *
-                                         renderChannels_ * sizeof(float));
+                                         renderChannels_ * (renderContainerBits_ / 8));
         renderService_->ReleaseBuffer(renderBufferFrameCount_, 0);
     }
 
@@ -548,16 +612,18 @@ void WasapiLowLatencyEngine::renderThreadProc() {
 
         // El DSP trabaja en estéreo. Colocamos L/R según la máscara real del
         // endpoint, evitando perder la imagen direccional en 5.1/7.1.
-        float* outFloat = reinterpret_cast<float*>(data);
+        // El formato de salida NO siempre es float: en modo Exclusive el
+        // driver puede haber aceptado solo PCM entero (ver initRenderClient
+        // / renderContainerBits_ / renderFormatIsFloat_).
+        const uint32_t containerBytes = renderContainerBits_ / 8;
+        std::memset(data, 0, static_cast<size_t>(framesToWrite) * renderChannels_ * containerBytes);
         for (UINT32 frame = 0; frame < framesToWrite; ++frame) {
-            for (UINT32 channel = 0; channel < renderChannels_; ++channel) {
-                outFloat[frame * renderChannels_ + channel] = 0.0f;
-            }
-            outFloat[frame * renderChannels_ + renderLeftChannel_] =
-                scratch[frame * config_.numChannels];
+            BYTE* frameBytes = data + static_cast<size_t>(frame) * renderChannels_ * containerBytes;
+            writeRenderSample(frameBytes + renderLeftChannel_ * containerBytes,
+                               scratch[frame * config_.numChannels]);
             if (config_.numChannels > 1) {
-                outFloat[frame * renderChannels_ + renderRightChannel_] =
-                    scratch[frame * config_.numChannels + 1];
+                writeRenderSample(frameBytes + renderRightChannel_ * containerBytes,
+                                   scratch[frame * config_.numChannels + 1]);
             }
         }
 
@@ -565,6 +631,32 @@ void WasapiLowLatencyEngine::renderThreadProc() {
     }
 
     unpinThread(avrtHandle);
+}
+
+// Escribe una muestra en el formato que el driver aceptó en Exclusive (float
+// o PCM entero de 16/24/32 bits) -- ver renderContainerBits_/renderFormatIsFloat_.
+void WasapiLowLatencyEngine::writeRenderSample(BYTE* dest, float value) const {
+    if (renderFormatIsFloat_) {
+        *reinterpret_cast<float*>(dest) = value;
+        return;
+    }
+    const float clamped = std::clamp(value, -1.0f, 1.0f);
+    if (renderContainerBits_ == 16) {
+        *reinterpret_cast<int16_t*>(dest) = static_cast<int16_t>(clamped * 32767.0f);
+    } else if (renderContainerBits_ == 24) {
+        const int32_t intVal = static_cast<int32_t>(clamped * 8388607.0f);
+        dest[0] = static_cast<BYTE>(intVal & 0xFF);
+        dest[1] = static_cast<BYTE>((intVal >> 8) & 0xFF);
+        dest[2] = static_cast<BYTE>((intVal >> 16) & 0xFF);
+    } else if (renderContainerBits_ == 32) {
+        // Nuestro único candidato de 32 bits es "24-in-32": 24 bits válidos
+        // empaquetados en la parte ALTA del contenedor de 32 (left-justified
+        // -- convención estándar de WASAPI/KSDATAFORMAT para este formato).
+        // NO es PCM de 32 bits completos -- escribir a escala completa de
+        // 32 bits aquí hacía que el driver leyera prácticamente silencio.
+        const int32_t sample24 = static_cast<int32_t>(clamped * 8388607.0f);
+        *reinterpret_cast<int32_t*>(dest) = sample24 << 8;
+    }
 }
 
 uint64_t WasapiLowLatencyEngine::insuredFrameEvents() const {

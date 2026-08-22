@@ -55,6 +55,15 @@ struct EngineConfig {
     bool useLoopbackCapture = true; // true: captura el audio que el juego ya envía a salida
     std::wstring captureDeviceName; // Subcadena del endpoint de loopback, vacía = predeterminado
     std::wstring renderDeviceName;  // Subcadena del endpoint físico de salida
+
+    // WASAPI Exclusive en el render evita el mezclador de Windows (menos
+    // latencia), pero por diseño de la API BLOQUEA el dispositivo físico
+    // para cualquier otra app mientras esté activo -- Discord, sonidos de
+    // Windows, Spotify, todo se queda mudo. Para una app que corre de fondo
+    // mientras se juega (con Discord abierto), ese trade-off no vale la
+    // pena por defecto. Déjalo en true solo si sabes que quieres perder el
+    // resto del audio del sistema a cambio de la latencia mínima.
+    bool allowExclusiveRender = false;
 };
 
 class WasapiLowLatencyEngine {
@@ -79,6 +88,9 @@ public:
     uint32_t sampleRate() const { return config_.sampleRate; }
     uint32_t numChannels() const { return config_.numChannels; }
     bool renderModeExclusive() const { return renderExclusive_; }
+    uint32_t renderContainerBits() const { return renderContainerBits_; }
+    bool renderFormatIsFloat() const { return renderFormatIsFloat_; }
+    uint32_t renderBufferFrames() const { return renderBufferFrameCount_; }
 
     WarzoneAudioChain& dspChain() { return dspChain_; }
 
@@ -88,6 +100,7 @@ private:
 
     void captureThreadProc();
     void renderThreadProc();
+    void writeRenderSample(BYTE* dest, float value) const;
 
     static void pinThreadTimeCritical(const wchar_t* avTaskName, HANDLE* avrtHandleOut);
     static void unpinThread(HANDLE avrtHandle);
@@ -115,6 +128,8 @@ private:
     UINT32 captureBlockAlign_ = 8;
     bool captureFormatIsFloat_ = true;
     bool renderExclusive_ = false;
+    UINT32 renderContainerBits_ = 32;
+    bool renderFormatIsFloat_ = true;
 
     std::unique_ptr<InsuredRingBuffer> ringBuffer_;
     WarzoneAudioChain dspChain_;

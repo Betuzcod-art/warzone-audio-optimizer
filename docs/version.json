@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "url": "https://github.com/Betuzcod-art/warzone-audio-optimizer/releases/latest",
-  "sha256": "DF1E7497C14DF423C84C7D5584304370E581A65AD4C2757D644F4F7B964728AC",
-  "notes": "Primera version publica: modo Exclusive con fallback automatico, guarda anti-drift del buffer, y cadena DSP multibanda (pasos + reduccion de vehiculos/explosiones/disparos)."
+  "sha256": "PENDIENTE_TRAS_REPAQUETAR",
+  "notes": "Realce dinamico de pasos (sube solo cuando la banda esta floja, no cuando hay disparos), ensanchado estereo Mid/Side en la banda de pasos para direccion mas nitida, y build en modo Release (antes compilabamos en Debug sin optimizar, lo que podia causar underruns/delay audible)."
 }

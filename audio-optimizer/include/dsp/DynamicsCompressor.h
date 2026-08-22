@@ -46,6 +46,13 @@ public:
         makeupLinear_ = dbToLinear(p.makeupGainDb);
     }
 
+    // Cambiar solo el umbral es barato y seguro en caliente: la curva
+    // estática lo lee directamente, sin recalcular coeficientes de
+    // ataque/release. Debe llamarse desde el hilo de audio (ver
+    // WarzoneAudioChain::applyPendingParams).
+    void setThresholdDb(float db) { params_.thresholdDb = db; }
+    float thresholdDb() const { return params_.thresholdDb; }
+
     // Procesa un bloque interleaved in-place. Detección de envolvente basada
     // en el máximo absoluto entre canales (para no descompensar la imagen
     // estéreo/posicional: la ganancia aplicada es la MISMA para todos los
