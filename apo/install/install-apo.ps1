@@ -69,6 +69,43 @@ function Write-Warn($text) { Write-Host "    $text" -ForegroundColor Yellow }
 function Write-Ok($text)   { Write-Host "    $text" -ForegroundColor Green }
 function Write-Err($text)  { Write-Host "    $text" -ForegroundColor Red }
 
+# ---------------------------------------------------------------------------
+# Escritura en FxProperties con el permiso MINIMO necesario.
+#
+# Las claves de MMDevices pertenecen a SYSTEM y conceden a Administradores
+# solo "SetValue, ReadKey" -- sin CreateSubKey. Set-ItemProperty abre la clave
+# pidiendo escritura COMPLETA (que incluye CreateSubKey), asi que Windows lo
+# deniega aunque solo vayamos a escribir un valor. Pedir exactamente SetValue
+# funciona sin tener que tomar posesion de la clave ni tocar ninguna ACL, que
+# seria mucho mas invasivo y dificil de revertir.
+# ---------------------------------------------------------------------------
+function Set-AudioRegistryValue {
+    param(
+        [Parameter(Mandatory)][string] $EndpointGuid,
+        [Parameter(Mandatory)][string] $SubKeyName,   # 'FxProperties' o 'Properties'
+        [Parameter(Mandatory)][string] $ValueName,
+        [Parameter(Mandatory)] $Value,
+        [Microsoft.Win32.RegistryValueKind] $Kind = [Microsoft.Win32.RegistryValueKind]::String
+    )
+
+    $path = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointGuid\$SubKeyName"
+    $key = $null
+    try {
+        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+            $path,
+            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+            [System.Security.AccessControl.RegistryRights]::SetValue)
+        if (-not $key) { return $false }
+        $key.SetValue($ValueName, $Value, $Kind)
+        return $true
+    } catch {
+        Write-Err "No se pudo escribir ${ValueName}: $($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($key) { $key.Close() }
+    }
+}
+
 Write-Host @'
 ================================================================
   Warzone Audio Optimizer - Instalador del APO
@@ -285,7 +322,15 @@ Set-ItemProperty -Path $AudioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type 
 Write-Warn 'DisableProtectedAudioDG = 1 (verificacion de firma de APOs desactivada)'
 
 if (-not $hadFxKey) { New-Item -Path $fxPath -Force | Out-Null }
-Set-ItemProperty -Path $fxPath -Name $targetSlotKey -Value $ApoClsid -Type String
+
+if (-not (Set-AudioRegistryValue -EndpointGuid $device.Guid -SubKeyName 'FxProperties' `
+                                  -ValueName $targetSlotKey -Value $ApoClsid)) {
+    Write-Err 'No se pudo asociar el APO al dispositivo.'
+    Write-Err 'Comprueba que esta ventana de PowerShell se abrio COMO ADMINISTRADOR'
+    Write-Err '(el titulo debe empezar por "Administrador:").'
+    Write-Err 'Ejecuta uninstall-apo.ps1 para dejar el sistema como estaba.'
+    exit 1
+}
 Write-Ok "APO asociado a $($device.Name) en $targetSlotName"
 
 # Si una instalacion anterior dejo los efectos desactivados, limpiarlo: si no,
@@ -293,8 +338,11 @@ Write-Ok "APO asociado a $($device.Name) en $targetSlotName"
 $deviceProps = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
 if ($deviceProps -and $deviceProps.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
     if ($deviceProps.$PkeyDisableSysFx -ne 0) {
-        Set-ItemProperty -Path $propsPath -Name $PkeyDisableSysFx -Value 0 -Type DWord
-        Write-Ok 'Se reactivaron los efectos del dispositivo (estaban desactivados)'
+        if (Set-AudioRegistryValue -EndpointGuid $device.Guid -SubKeyName 'Properties' `
+                                    -ValueName $PkeyDisableSysFx -Value 0 `
+                                    -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)) {
+            Write-Ok 'Se reactivaron los efectos del dispositivo (estaban desactivados)'
+        }
     }
 }
 

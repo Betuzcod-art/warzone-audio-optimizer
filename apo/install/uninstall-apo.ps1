@@ -50,6 +50,47 @@ function Write-Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
 function Write-Ok($text)   { Write-Host "    $text" -ForegroundColor Green }
 function Write-Warn($text) { Write-Host "    $text" -ForegroundColor Yellow }
 
+# ---------------------------------------------------------------------------
+# Acceso a FxProperties con el permiso MINIMO necesario.
+#
+# Estas claves pertenecen a SYSTEM y dan a Administradores solo "SetValue,
+# ReadKey". Los cmdlets Set-ItemProperty / Remove-ItemProperty abren la clave
+# pidiendo escritura completa (incluye CreateSubKey) y Windows lo deniega.
+# Pedir exactamente SetValue -- que tambien cubre borrar valores -- funciona
+# sin tocar ninguna ACL.
+# ---------------------------------------------------------------------------
+function Open-AudioKeyForWrite {
+    param([string] $EndpointGuid, [string] $SubKeyName)
+    $path = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointGuid\$SubKeyName"
+    try {
+        return [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+            $path,
+            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+            [System.Security.AccessControl.RegistryRights]::SetValue)
+    } catch {
+        return $null
+    }
+}
+
+function Set-AudioRegistryValue {
+    param([string] $EndpointGuid, [string] $SubKeyName, [string] $ValueName, $Value,
+          [Microsoft.Win32.RegistryValueKind] $Kind = [Microsoft.Win32.RegistryValueKind]::String)
+    $key = Open-AudioKeyForWrite $EndpointGuid $SubKeyName
+    if (-not $key) { return $false }
+    try { $key.SetValue($ValueName, $Value, $Kind); return $true }
+    catch { return $false }
+    finally { $key.Close() }
+}
+
+function Remove-AudioRegistryValue {
+    param([string] $EndpointGuid, [string] $SubKeyName, [string] $ValueName)
+    $key = Open-AudioKeyForWrite $EndpointGuid $SubKeyName
+    if (-not $key) { return $false }
+    try { $key.DeleteValue($ValueName, $false); return $true }
+    catch { return $false }
+    finally { $key.Close() }
+}
+
 Write-Host @'
 ================================================================
   Warzone Audio Optimizer - Desinstalador del APO
@@ -78,13 +119,18 @@ if ($backup -and $backup.EndpointGuid) {
 
     if ($backup.PSObject.Properties.Name -contains 'ReplacedValue') {
         # Habiamos pisado un efecto del fabricante: devolverlo a su sitio.
-        Set-ItemProperty -Path $fxPath -Name $usedSlot `
-                         -Value $backup.ReplacedValue -Type String -ErrorAction SilentlyContinue
-        Write-Ok "Efecto original del fabricante restaurado: $($backup.ReplacedValue)"
+        if (Set-AudioRegistryValue $backup.EndpointGuid 'FxProperties' $usedSlot $backup.ReplacedValue) {
+            Write-Ok "Efecto original del fabricante restaurado: $($backup.ReplacedValue)"
+        } else {
+            Write-Warn 'No se pudo restaurar el efecto original (permisos?)'
+        }
     } else {
         # Entramos en un slot que estaba libre: basta con vaciarlo.
-        Remove-ItemProperty -Path $fxPath -Name $usedSlot -ErrorAction SilentlyContinue
-        Write-Ok 'Asociacion del APO eliminada (el slot estaba libre al instalar)'
+        if (Remove-AudioRegistryValue $backup.EndpointGuid 'FxProperties' $usedSlot) {
+            Write-Ok 'Asociacion del APO eliminada (el slot estaba libre al instalar)'
+        } else {
+            Write-Warn 'No habia nada que eliminar en ese slot'
+        }
     }
 
     # Si la clave FxProperties no existia antes, la quitamos si quedo vacia.
@@ -105,9 +151,12 @@ if ($backup -and $backup.EndpointGuid) {
         foreach ($slot in $AllSlots) {
             if ($props.PSObject.Properties.Name -contains $slot) {
                 if ($props.$slot -eq $ApoClsid) {
-                    Remove-ItemProperty -Path $fxPath -Name $slot -ErrorAction SilentlyContinue
-                    Write-Ok "Asociacion eliminada de $($_.PSChildName)"
-                    $script:touchedPaths += $_.PSPath
+                    if (Remove-AudioRegistryValue $_.PSChildName 'FxProperties' $slot) {
+                        Write-Ok "Asociacion eliminada de $($_.PSChildName)"
+                        $script:touchedPaths += $_.PSPath
+                    } else {
+                        Write-Warn "No se pudo limpiar $($_.PSChildName) (permisos?)"
+                    }
                 }
             }
         }
@@ -125,12 +174,12 @@ Write-Step 'Comprobando si Windows desactivo los efectos del dispositivo...'
 
 $reenabled = 0
 Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
-    $propsPath = Join-Path $_.PSPath 'Properties'
-    $props = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
+    $props = Get-ItemProperty -Path (Join-Path $_.PSPath 'Properties') -ErrorAction SilentlyContinue
     if ($props -and $props.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
         if ($props.$PkeyDisableSysFx -ne 0) {
-            Set-ItemProperty -Path $propsPath -Name $PkeyDisableSysFx -Value 0 -Type DWord -ErrorAction SilentlyContinue
-            $script:reenabled++
+            if (Set-AudioRegistryValue $_.PSChildName 'Properties' $PkeyDisableSysFx 0 ([Microsoft.Win32.RegistryValueKind]::DWord)) {
+                $script:reenabled++
+            }
         }
     }
 }
