@@ -6,17 +6,19 @@
     Revierte exactamente lo que hizo install-apo.ps1:
       - Restaura el efecto de modo original del dispositivo (o lo quita si no
         habia ninguno antes).
+      - Reactiva los efectos del dispositivo si Windows los desactivo por
+        fallos de carga del APO.
       - Restaura DisableProtectedAudioDG a su estado previo.
       - Desregistra y borra la DLL.
-      - Reinicia el servicio de audio.
+      - Recarga el motor de audio.
 
     ESTE ES EL SCRIPT DE RESCATE. Si te quedaste sin audio tras instalar,
     ejecuta este como administrador.
 
     Esta escrito para funcionar incluso si el backup se perdio: en ese caso
-    limpia la asociacion del APO igualmente, dejando el dispositivo sin
-    efecto de modo (que es un estado valido -- Windows simplemente no aplica
-    efectos de fabricante).
+    barre TODOS los dispositivos quitando la asociacion del APO, porque
+    dejarte sin audio por no encontrar un backup seria el peor resultado
+    posible.
 
 .NOTES
     Requiere ejecutarse como Administrador.
@@ -24,7 +26,9 @@
 
 #Requires -RunAsAdministrator
 
-$ErrorActionPreference = 'Continue'   # seguir aunque un paso falle: es rescate
+# Continue, no Stop: esto es rescate. Si un paso falla, los siguientes deben
+# ejecutarse igual -- parar a la primera podria dejar el audio roto.
+$ErrorActionPreference = 'Continue'
 
 $ApoClsid   = '{E76EE61C-E30D-4C52-994D-F54422E9A2C9}'
 $DllName    = 'WarzoneAudioApo.dll'
@@ -32,7 +36,9 @@ $InstallDir = Join-Path $env:ProgramFiles 'Warzone Audio Optimizer'
 $BackupKey  = 'HKLM:\SOFTWARE\WarzoneAudioOptimizer\ApoBackup'
 $RenderRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
 $AudioKey   = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
-$PkeyModeEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
+
+$PkeyModeEffect   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
+$PkeyDisableSysFx = '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},5'
 
 function Write-Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
 function Write-Ok($text)   { Write-Host "    $text" -ForegroundColor Green }
@@ -50,9 +56,12 @@ Write-Host @'
 Write-Step 'Restaurando configuracion del dispositivo...'
 
 $backup = Get-ItemProperty -Path $BackupKey -ErrorAction SilentlyContinue
+$touchedPaths = @()
 
 if ($backup -and $backup.EndpointGuid) {
-    $fxPath = Join-Path (Join-Path $RenderRoot $backup.EndpointGuid) 'FxProperties'
+    $endpointPath = Join-Path $RenderRoot $backup.EndpointGuid
+    $fxPath = Join-Path $endpointPath 'FxProperties'
+    $touchedPaths += $endpointPath
 
     if ($backup.PSObject.Properties.Name -contains 'OriginalModeEffect') {
         Set-ItemProperty -Path $fxPath -Name $PkeyModeEffect `
@@ -71,8 +80,7 @@ if ($backup -and $backup.EndpointGuid) {
         }
     }
 } else {
-    Write-Warn 'No se encontro backup. Barriendo todos los dispositivos por si acaso...'
-    # Rescate: quitar la asociacion del APO donde sea que este.
+    Write-Warn 'No se encontro backup. Barriendo todos los dispositivos...'
     Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
         $fxPath = Join-Path $_.PSPath 'FxProperties'
         $props = Get-ItemProperty -Path $fxPath -ErrorAction SilentlyContinue
@@ -80,13 +88,40 @@ if ($backup -and $backup.EndpointGuid) {
             if ($props.$PkeyModeEffect -eq $ApoClsid) {
                 Remove-ItemProperty -Path $fxPath -Name $PkeyModeEffect -ErrorAction SilentlyContinue
                 Write-Ok "Asociacion eliminada de $($_.PSChildName)"
+                $script:touchedPaths += $_.PSPath
             }
         }
     }
 }
 
 # ---------------------------------------------------------------------------
-# 2. Restaurar la verificacion de firma de APOs
+# 2. Reactivar los efectos si Windows los desactivo
+# ---------------------------------------------------------------------------
+# Cuando un APO falla al cargar repetidamente, Windows pone Disable_SysFx=1 y
+# el dispositivo se queda SIN NINGUN efecto -- incluidos los del fabricante.
+# Si no se limpia, el audio "funciona" pero sin los efectos que tenia antes,
+# y es un sintoma dificil de diagnosticar despues.
+Write-Step 'Comprobando si Windows desactivo los efectos del dispositivo...'
+
+$reenabled = 0
+Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
+    $propsPath = Join-Path $_.PSPath 'Properties'
+    $props = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
+    if ($props -and $props.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
+        if ($props.$PkeyDisableSysFx -ne 0) {
+            Set-ItemProperty -Path $propsPath -Name $PkeyDisableSysFx -Value 0 -Type DWord -ErrorAction SilentlyContinue
+            $script:reenabled++
+        }
+    }
+}
+if ($reenabled -gt 0) {
+    Write-Ok "Efectos reactivados en $reenabled dispositivo(s)"
+} else {
+    Write-Ok 'Ningun dispositivo tenia los efectos desactivados'
+}
+
+# ---------------------------------------------------------------------------
+# 3. Restaurar la verificacion de firma de APOs
 # ---------------------------------------------------------------------------
 Write-Step 'Restaurando la verificacion de firma de APOs...'
 
@@ -98,9 +133,9 @@ if ($backup -and $backup.HadDisableFlag -eq 1) {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Desregistrar y borrar la DLL
+# 4. Desregistrar la DLL
 # ---------------------------------------------------------------------------
-Write-Step 'Eliminando la DLL...'
+Write-Step 'Desregistrando la DLL...'
 
 $targetDll = Join-Path $InstallDir $DllName
 if (Test-Path $targetDll) {
@@ -108,32 +143,69 @@ if (Test-Path $targetDll) {
     Write-Ok 'COM desregistrado'
 } else {
     Write-Warn 'La DLL ya no estaba en su sitio'
+    # Aun asi limpiamos el registro por si quedo huerfano.
+    Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\CLSID\$ApoClsid" -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------------------
-# 4. Reiniciar el audio (libera la DLL para poder borrarla)
+# 5. Recargar el motor de audio
 # ---------------------------------------------------------------------------
-Write-Step 'Reiniciando el servicio de audio...'
+Write-Step 'Recargando el motor de audio...'
 try {
-    Restart-Service -Name 'Audiosrv' -Force
-    Write-Ok 'Servicio de audio reiniciado'
-    Start-Sleep -Seconds 2
+    Restart-Service -Name 'AudioEndpointBuilder' -Force
+    Write-Ok 'Motor de audio reiniciado'
+    Start-Sleep -Seconds 3
 } catch {
-    Write-Warn "No se pudo reiniciar: $_"
+    Write-Warn "No se pudo reiniciar: $($_.Exception.Message)"
+    Write-Warn 'Reinicia Windows para completar la desinstalacion.'
 }
 
 # El borrado va DESPUES del reinicio: mientras audiodg tenga la DLL cargada,
-# el archivo esta bloqueado.
+# el archivo esta bloqueado y no se puede eliminar.
 if (Test-Path $targetDll) {
     Remove-Item $targetDll -Force -ErrorAction SilentlyContinue
     if (Test-Path $targetDll) {
-        Write-Warn 'La DLL sigue bloqueada; se borrara al reiniciar Windows.'
+        Write-Warn 'La DLL sigue bloqueada; se podra borrar tras reiniciar Windows.'
     } else {
         Write-Ok 'DLL eliminada'
     }
 }
 
 Remove-Item -Path $BackupKey -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------------
+# 6. Verificar que quedo limpio
+# ---------------------------------------------------------------------------
+Write-Step 'Verificando...'
+
+$leftovers = 0
+Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
+    $props = Get-ItemProperty -Path (Join-Path $_.PSPath 'FxProperties') -ErrorAction SilentlyContinue
+    if ($props -and $props.PSObject.Properties.Name -contains $PkeyModeEffect) {
+        if ($props.$PkeyModeEffect -eq $ApoClsid) { $script:leftovers++ }
+    }
+}
+
+if ($leftovers -eq 0) {
+    Write-Ok 'Ningun dispositivo apunta ya al APO'
+} else {
+    Write-Warn "Quedan $leftovers referencias al APO. Vuelve a ejecutar este script."
+}
+
+$stillLoaded = $false
+$audiodg = Get-Process -Name 'audiodg' -ErrorAction SilentlyContinue
+if ($audiodg) {
+    try {
+        foreach ($m in $audiodg.Modules) {
+            if ($m.ModuleName -eq $DllName) { $stillLoaded = $true; break }
+        }
+    } catch { }
+}
+if ($stillLoaded) {
+    Write-Warn 'La DLL sigue cargada en memoria; se soltara al reiniciar Windows.'
+} else {
+    Write-Ok 'La DLL no esta cargada en el motor de audio'
+}
 
 Write-Host @'
 
@@ -143,7 +215,10 @@ Write-Host @'
 
   Tu audio deberia funcionar como antes de instalar el APO.
 
-  Si todavia no oyes nada, reinicia Windows: algunos cambios del
-  motor de audio solo se aplican del todo tras reiniciar.
+  Si todavia no oyes nada:
+    1. Reinicia Windows (algunos cambios del motor de audio solo
+       se aplican del todo tras reiniciar).
+    2. Comprueba en Configuracion > Sonido que el dispositivo de
+       salida correcto sigue seleccionado.
 
 '@ -ForegroundColor White

@@ -36,16 +36,24 @@ $DllName    = 'WarzoneAudioApo.dll'
 $InstallDir = Join-Path $env:ProgramFiles 'Warzone Audio Optimizer'
 $BackupKey  = 'HKLM:\SOFTWARE\WarzoneAudioOptimizer\ApoBackup'
 $RenderRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
+$AudioKey   = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
 
-# Property keys del motor de audio. La ",6" es PKEY_FX_ModeEffectClsid: el
-# efecto de modo, que se aplica a la mezcla ya combinada -- justo donde
-# queremos insertarnos.
+# Property keys del motor de audio.
+#   ,6 = PKEY_FX_ModeEffectClsid -- el efecto de modo, que se aplica a la
+#        mezcla ya combinada. Es donde queremos insertarnos.
+#   Las ,5 (stream) y ,7 (endpoint) se dejan intactas.
 $PkeyModeEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
-# La ",5" (stream effect) y ",7" (endpoint effect) se dejan intactas.
 
-function Write-Step($text)  { Write-Host "`n==> $text" -ForegroundColor Cyan }
-function Write-Warn($text)  { Write-Host "    $text" -ForegroundColor Yellow }
-function Write-Ok($text)    { Write-Host "    $text" -ForegroundColor Green }
+# PKEY_AudioEndpoint_Disable_SysFx. Windows la pone a 1 automaticamente si un
+# APO falla al cargar repetidamente (10 veces), y entonces DESACTIVA todos los
+# efectos del dispositivo. Hay que vigilarla: explica el clasico "instale algo
+# y ahora no funciona ningun efecto".
+$PkeyDisableSysFx = '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},5'
+
+function Write-Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
+function Write-Warn($text) { Write-Host "    $text" -ForegroundColor Yellow }
+function Write-Ok($text)   { Write-Host "    $text" -ForegroundColor Green }
+function Write-Err($text)  { Write-Host "    $text" -ForegroundColor Red }
 
 Write-Host @'
 ================================================================
@@ -57,6 +65,9 @@ Write-Warn 'Este instalador desactiva la verificacion de firma de APOs de Window
 Write-Warn '(DisableProtectedAudioDG). Es necesario para cargar un APO sin firmar.'
 Write-Warn 'No se toca Secure Boot. El riesgo frente a anti-cheat es tuyo.'
 Write-Host ''
+Write-Warn 'TEN A MANO uninstall-apo.ps1 antes de continuar: si algo falla,'
+Write-Warn 'es lo que te devuelve el audio.'
+Write-Host ''
 $confirm = Read-Host 'Escribe ACEPTO para continuar'
 if ($confirm -ne 'ACEPTO') {
     Write-Host 'Cancelado. No se ha modificado nada.' -ForegroundColor Red
@@ -64,7 +75,26 @@ if ($confirm -ne 'ACEPTO') {
 }
 
 # ---------------------------------------------------------------------------
-# 1. Elegir el dispositivo de salida
+# 1. Localizar la DLL antes de tocar nada del sistema
+# ---------------------------------------------------------------------------
+Write-Step 'Localizando la DLL...'
+
+$sourceDll = $null
+foreach ($candidate in @(
+    (Join-Path $PSScriptRoot "..\build\$DllName"),
+    (Join-Path $PSScriptRoot $DllName)
+)) {
+    if (Test-Path $candidate) { $sourceDll = (Resolve-Path $candidate).Path; break }
+}
+if (-not $sourceDll) {
+    Write-Err "No se encontro $DllName."
+    Write-Err 'Compila el proyecto primero (apo/build) o deja la DLL junto a este script.'
+    exit 1
+}
+Write-Ok "Encontrada: $sourceDll"
+
+# ---------------------------------------------------------------------------
+# 2. Elegir el dispositivo de salida
 # ---------------------------------------------------------------------------
 Write-Step 'Buscando dispositivos de salida activos...'
 
@@ -75,8 +105,7 @@ Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
     # DeviceState 1 = activo. Ignoramos deshabilitados/desconectados.
     if ($state -ne 1) { return }
 
-    $propsPath = Join-Path $endpointKey 'Properties'
-    $props = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
+    $props = Get-ItemProperty -Path (Join-Path $endpointKey 'Properties') -ErrorAction SilentlyContinue
     if (-not $props) { return }
 
     # PKEY_Device_DeviceDesc / PKEY_Device_FriendlyName. El "friendly" suele
@@ -88,8 +117,8 @@ Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
 
     # Efecto de modo ya registrado por el fabricante, si lo hay: instalarnos
     # ahi lo REEMPLAZA, asi que hay que avisar antes.
-    $fxPath = Join-Path $endpointKey 'FxProperties'
     $existingMfx = $null
+    $fxPath = Join-Path $endpointKey 'FxProperties'
     if (Test-Path $fxPath) {
         $fx = Get-ItemProperty -Path $fxPath -ErrorAction SilentlyContinue
         if ($fx -and $fx.PSObject.Properties.Name -contains $PkeyModeEffect) {
@@ -98,16 +127,15 @@ Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
     }
 
     $devices += [PSCustomObject]@{
-        Name = $name
-        Desc = $desc
-        Guid = $_.PSChildName
-        Path = $endpointKey
+        Name        = $name
+        Guid        = $_.PSChildName
+        Path        = $endpointKey
         ExistingMfx = $existingMfx
     }
 }
 
 if ($devices.Count -eq 0) {
-    Write-Host 'No se encontraron dispositivos de salida activos.' -ForegroundColor Red
+    Write-Err 'No se encontraron dispositivos de salida activos.'
     exit 1
 }
 
@@ -115,7 +143,7 @@ Write-Host ''
 for ($i = 0; $i -lt $devices.Count; $i++) {
     $d = $devices[$i]
     Write-Host ("  [{0}] {1}" -f $i, $d.Name) -ForegroundColor White
-    # El GUID corto desempata cuando dos dispositivos comparten nombre.
+    # El id corto desempata cuando dos dispositivos comparten nombre.
     Write-Host ("      id: {0}" -f $d.Guid.Substring(1, 8)) -ForegroundColor DarkGray
     if ($d.ExistingMfx) {
         Write-Host "      OJO: ya tiene un efecto de fabricante; se reemplazara" -ForegroundColor Yellow
@@ -129,7 +157,7 @@ $choice = Read-Host 'Numero de dispositivo'
 
 $index = 0
 if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 0 -or $index -ge $devices.Count) {
-    Write-Host 'Seleccion invalida.' -ForegroundColor Red
+    Write-Err 'Seleccion invalida.'
     exit 1
 }
 $device = $devices[$index]
@@ -148,18 +176,41 @@ if ($device.ExistingMfx) {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Copiar y registrar la DLL
+# 3. Guardar el estado original ANTES de tocar nada
+# ---------------------------------------------------------------------------
+Write-Step 'Guardando configuracion original (para poder revertir)...'
+
+if (-not (Test-Path $BackupKey)) { New-Item -Path $BackupKey -Force | Out-Null }
+
+$fxPath = Join-Path $device.Path 'FxProperties'
+$propsPath = Join-Path $device.Path 'Properties'
+$hadFxKey = Test-Path $fxPath
+
+Set-ItemProperty -Path $BackupKey -Name 'EndpointGuid' -Value $device.Guid
+Set-ItemProperty -Path $BackupKey -Name 'EndpointName' -Value $device.Name
+Set-ItemProperty -Path $BackupKey -Name 'HadFxKey' -Value ([int]$hadFxKey)
+
+if ($null -ne $device.ExistingMfx) {
+    Set-ItemProperty -Path $BackupKey -Name 'OriginalModeEffect' -Value $device.ExistingMfx
+    Write-Ok "Efecto de modo original guardado: $($device.ExistingMfx)"
+} else {
+    Remove-ItemProperty -Path $BackupKey -Name 'OriginalModeEffect' -ErrorAction SilentlyContinue
+    Write-Ok 'El dispositivo no tenia efecto de modo previo'
+}
+
+$originalDisable = $null
+if (Test-Path $AudioKey) {
+    $audioProps = Get-ItemProperty -Path $AudioKey -ErrorAction SilentlyContinue
+    if ($audioProps -and $audioProps.PSObject.Properties.Name -contains 'DisableProtectedAudioDG') {
+        $originalDisable = $audioProps.DisableProtectedAudioDG
+    }
+}
+Set-ItemProperty -Path $BackupKey -Name 'HadDisableFlag' -Value ([int]($null -ne $originalDisable))
+
+# ---------------------------------------------------------------------------
+# 4. Instalar y registrar la DLL
 # ---------------------------------------------------------------------------
 Write-Step 'Instalando la DLL...'
-
-$sourceDll = Join-Path $PSScriptRoot "..\build\$DllName"
-if (-not (Test-Path $sourceDll)) {
-    $sourceDll = Join-Path $PSScriptRoot $DllName
-}
-if (-not (Test-Path $sourceDll)) {
-    Write-Host "No se encontro $DllName. Compila el proyecto primero." -ForegroundColor Red
-    exit 1
-}
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -170,75 +221,94 @@ Write-Ok "Copiada a $targetDll"
 
 $regsvr = Start-Process -FilePath 'regsvr32.exe' -ArgumentList '/s', "`"$targetDll`"" -Wait -PassThru
 if ($regsvr.ExitCode -ne 0) {
-    Write-Host "regsvr32 fallo (codigo $($regsvr.ExitCode))." -ForegroundColor Red
+    Write-Err "regsvr32 fallo (codigo $($regsvr.ExitCode)). No se ha tocado la configuracion de audio."
     exit 1
 }
 Write-Ok 'COM registrado'
 
 # ---------------------------------------------------------------------------
-# 3. Guardar el estado original ANTES de tocar nada
-# ---------------------------------------------------------------------------
-Write-Step 'Guardando configuracion original (para poder revertir)...'
-
-if (-not (Test-Path $BackupKey)) {
-    New-Item -Path $BackupKey -Force | Out-Null
-}
-
-$fxPath = Join-Path $device.Path 'FxProperties'
-$hadFxKey = Test-Path $fxPath
-
-$originalMfx = $null
-if ($hadFxKey) {
-    $fxProps = Get-ItemProperty -Path $fxPath -ErrorAction SilentlyContinue
-    if ($fxProps -and $fxProps.PSObject.Properties.Name -contains $PkeyModeEffect) {
-        $originalMfx = $fxProps.$PkeyModeEffect
-    }
-}
-
-Set-ItemProperty -Path $BackupKey -Name 'EndpointGuid' -Value $device.Guid
-Set-ItemProperty -Path $BackupKey -Name 'EndpointName' -Value $device.Name
-Set-ItemProperty -Path $BackupKey -Name 'HadFxKey' -Value ([int]$hadFxKey)
-if ($null -ne $originalMfx) {
-    Set-ItemProperty -Path $BackupKey -Name 'OriginalModeEffect' -Value $originalMfx
-    Write-Ok "Efecto de modo original guardado: $originalMfx"
-} else {
-    Remove-ItemProperty -Path $BackupKey -Name 'OriginalModeEffect' -ErrorAction SilentlyContinue
-    Write-Ok 'El dispositivo no tenia efecto de modo previo'
-}
-
-$audioKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
-$originalDisable = $null
-if (Test-Path $audioKey) {
-    $audioProps = Get-ItemProperty -Path $audioKey -ErrorAction SilentlyContinue
-    if ($audioProps -and $audioProps.PSObject.Properties.Name -contains 'DisableProtectedAudioDG') {
-        $originalDisable = $audioProps.DisableProtectedAudioDG
-    }
-}
-Set-ItemProperty -Path $BackupKey -Name 'HadDisableFlag' -Value ([int]($null -ne $originalDisable))
-
-# ---------------------------------------------------------------------------
-# 4. Aplicar la configuracion
+# 5. Aplicar la configuracion de audio
 # ---------------------------------------------------------------------------
 Write-Step 'Aplicando configuracion...'
 
-if (-not (Test-Path $audioKey)) { New-Item -Path $audioKey -Force | Out-Null }
-Set-ItemProperty -Path $audioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type DWord
+if (-not (Test-Path $AudioKey)) { New-Item -Path $AudioKey -Force | Out-Null }
+Set-ItemProperty -Path $AudioKey -Name 'DisableProtectedAudioDG' -Value 1 -Type DWord
 Write-Warn 'DisableProtectedAudioDG = 1 (verificacion de firma de APOs desactivada)'
 
 if (-not $hadFxKey) { New-Item -Path $fxPath -Force | Out-Null }
 Set-ItemProperty -Path $fxPath -Name $PkeyModeEffect -Value $ApoClsid -Type String
 Write-Ok "APO asociado a $($device.Name)"
 
+# Si una instalacion anterior dejo los efectos desactivados, limpiarlo: si no,
+# el APO cargaria bien pero Windows lo ignoraria igualmente.
+$deviceProps = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
+if ($deviceProps -and $deviceProps.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
+    if ($deviceProps.$PkeyDisableSysFx -ne 0) {
+        Set-ItemProperty -Path $propsPath -Name $PkeyDisableSysFx -Value 0 -Type DWord
+        Write-Ok 'Se reactivaron los efectos del dispositivo (estaban desactivados)'
+    }
+}
+
 # ---------------------------------------------------------------------------
-# 5. Reiniciar el servicio de audio para que cargue el APO
+# 6. Recargar el motor de audio
 # ---------------------------------------------------------------------------
-Write-Step 'Reiniciando el servicio de audio...'
+Write-Step 'Recargando el motor de audio...'
+
+# Reiniciar AudioEndpointBuilder (no solo Audiosrv): es quien reconstruye el
+# grafo de endpoints y relee las propiedades FX. Audiosrv depende de el, asi
+# que -Force reinicia ambos y con ellos audiodg.exe, que es donde carga el APO.
+$restarted = $false
 try {
-    Restart-Service -Name 'Audiosrv' -Force
-    Write-Ok 'Servicio de audio reiniciado'
+    Restart-Service -Name 'AudioEndpointBuilder' -Force
+    $restarted = $true
+    Write-Ok 'Motor de audio reiniciado'
+    Start-Sleep -Seconds 3
 } catch {
-    Write-Warn "No se pudo reiniciar automaticamente: $_"
+    Write-Warn "No se pudo reiniciar automaticamente: $($_.Exception.Message)"
     Write-Warn 'Reinicia Windows para aplicar los cambios.'
+}
+
+# ---------------------------------------------------------------------------
+# 7. Verificar que el APO realmente cargo
+# ---------------------------------------------------------------------------
+if ($restarted) {
+    Write-Step 'Comprobando si el APO cargo...'
+    Write-Host '    (reproduce audio ahora por ese dispositivo para forzar la carga)' -ForegroundColor DarkGray
+    Start-Sleep -Seconds 4
+
+    $loaded = $false
+    try {
+        $audiodg = Get-Process -Name 'audiodg' -ErrorAction SilentlyContinue
+        if ($audiodg) {
+            foreach ($m in $audiodg.Modules) {
+                if ($m.ModuleName -eq $DllName) { $loaded = $true; break }
+            }
+        }
+    } catch {
+        # Enumerar modulos de audiodg puede fallar por permisos; no es
+        # concluyente, asi que no lo tratamos como error.
+        $loaded = $null
+    }
+
+    if ($loaded -eq $true) {
+        Write-Ok 'CONFIRMADO: el APO esta cargado en el motor de audio'
+    } elseif ($null -eq $loaded) {
+        Write-Warn 'No se pudo inspeccionar audiodg.exe (normal por permisos).'
+        Write-Warn 'Comprueba a oido si el audio suena procesado.'
+    } else {
+        Write-Warn 'Todavia no aparece cargado. Puede ser normal si no hay audio'
+        Write-Warn 'sonando: Windows carga el APO al abrir el primer stream.'
+        Write-Warn 'Reproduce algo y vuelve a comprobar. Si sigue sin sonar'
+        Write-Warn 'procesado, ejecuta uninstall-apo.ps1.'
+    }
+
+    $sysFxNow = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
+    if ($sysFxNow -and $sysFxNow.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
+        if ($sysFxNow.$PkeyDisableSysFx -ne 0) {
+            Write-Err 'Windows desactivo los efectos del dispositivo: el APO fallo al cargar.'
+            Write-Err 'Ejecuta uninstall-apo.ps1 para dejarlo todo como estaba.'
+        }
+    }
 }
 
 Write-Host @"
@@ -253,10 +323,14 @@ Write-Host @"
 
   COMO PROBAR
     Reproduce audio por ese dispositivo. Deberia sonar procesado,
-    sin necesidad de abrir ninguna app y sin delay perceptible.
+    sin abrir ninguna app y sin delay perceptible.
+
+  CAMBIAR AJUSTES
+    Muevelos en la app de escritorio. El APO relee el archivo cuando
+    el motor lo reinicializa, no al instante: para forzarlo, cambia
+    el dispositivo de salida y vuelve, o reinicia el servicio de audio.
 
   SI TE QUEDASTE SIN AUDIO
-    Ejecuta uninstall-apo.ps1 como administrador. Restaura la
-    configuracion original que se acaba de guardar.
+    Ejecuta uninstall-apo.ps1 como administrador.
 
 "@ -ForegroundColor White
