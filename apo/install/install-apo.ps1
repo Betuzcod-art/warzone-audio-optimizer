@@ -126,6 +126,62 @@ if ($confirm -ne 'ACEPTO') {
 }
 
 # ---------------------------------------------------------------------------
+# 0. Limpiar una instalacion previa
+#
+# Sin esto, reinstalar en OTRO dispositivo sobrescribiria el backup y el
+# desinstalador perderia el rastro del anterior, dejandolo asociado para
+# siempre. Mover el APO de sitio es justo lo que se hace cuando el primero
+# resulta no ser el dispositivo correcto, asi que este caso es la norma, no
+# la excepcion.
+# ---------------------------------------------------------------------------
+Write-Step 'Comprobando si ya hay una instalacion previa...'
+
+$previous = @()
+Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
+    $fxProps = Get-ItemProperty -Path (Join-Path $_.PSPath 'FxProperties') -ErrorAction SilentlyContinue
+    if (-not $fxProps) { return }
+    foreach ($slot in @($PkeyStreamEffect, $PkeyModeEffect, $PkeyEndpointEffect)) {
+        if ($fxProps.PSObject.Properties.Name -contains $slot -and $fxProps.$slot -eq $ApoClsid) {
+            $script:previous += [PSCustomObject]@{ Guid = $_.PSChildName; Slot = $slot }
+        }
+    }
+}
+
+if ($previous.Count -gt 0) {
+    $oldBackup = Get-ItemProperty -Path $BackupKey -ErrorAction SilentlyContinue
+    Write-Warn "Ya hay $($previous.Count) instalacion(es) previa(s) del APO."
+    Write-Warn 'Se limpiaran antes de instalar en el nuevo dispositivo.'
+
+    foreach ($prev in $previous) {
+        # Si el backup dice que ahi habiamos pisado un efecto, devolverlo.
+        $restored = $false
+        if ($oldBackup -and $oldBackup.EndpointGuid -eq $prev.Guid -and
+            ($oldBackup.PSObject.Properties.Name -contains 'ReplacedValue')) {
+            $restored = Set-AudioRegistryValue -EndpointGuid $prev.Guid -SubKeyName 'FxProperties' `
+                                                -ValueName $prev.Slot -Value $oldBackup.ReplacedValue
+            if ($restored) { Write-Ok "Efecto del fabricante restaurado en $($prev.Guid.Substring(1,8))" }
+        }
+        if (-not $restored) {
+            $key = $null
+            try {
+                $path = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$($prev.Guid)\FxProperties"
+                $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($path,
+                        [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                        [System.Security.AccessControl.RegistryRights]::SetValue)
+                if ($key) { $key.DeleteValue($prev.Slot, $false) }
+                Write-Ok "Instalacion previa eliminada de $($prev.Guid.Substring(1,8))"
+            } catch {
+                Write-Warn "No se pudo limpiar $($prev.Guid.Substring(1,8)): $($_.Exception.Message)"
+            } finally {
+                if ($key) { $key.Close() }
+            }
+        }
+    }
+} else {
+    Write-Ok 'No hay instalaciones previas'
+}
+
+# ---------------------------------------------------------------------------
 # 1. Localizar la DLL antes de tocar nada del sistema
 # ---------------------------------------------------------------------------
 Write-Step 'Localizando la DLL...'
