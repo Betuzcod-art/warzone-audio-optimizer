@@ -7,10 +7,56 @@
 #include <string>
 #include <new>
 #include <stdexcept>
+#include <cstdarg>
+#include <cstdio>
 
 namespace warzoneapo {
 
 namespace {
+
+// -----------------------------------------------------------------------------
+// Log de diagnostico del APO.
+//
+// Un APO que no carga es invisible: Windows no avisa, no hay error, y desde
+// fuera es indistinguible de "el audio no pasa por aqui". Este log es la unica
+// forma de saber si el motor llego a instanciarnos y con que formato.
+//
+// Se escribe en ProgramData porque audiodg.exe corre como SYSTEM: su %TEMP%
+// no es el del usuario, y hace falta un sitio que ambos puedan leer.
+//
+// NUNCA se llama desde APOProcess: abrir un archivo en el camino de tiempo
+// real es justo lo que no se puede hacer.
+// -----------------------------------------------------------------------------
+void apoLog(const wchar_t* format, ...) {
+    wchar_t message[512]{};
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(message, std::size(message), _TRUNCATE, format, args);
+    va_end(args);
+
+    const wchar_t* dir = L"C:\\ProgramData\\WarzoneAudioOptimizer";
+    CreateDirectoryW(dir, nullptr);
+    const std::wstring path = std::wstring(dir) + L"\\apo.log";
+
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t line[640]{};
+    _snwprintf_s(line, std::size(line), _TRUNCATE, L"[%02d:%02d:%02d] %s\r\n",
+                 now.wHour, now.wMinute, now.wSecond, message);
+
+    std::string narrow;
+    for (const wchar_t* p = line; *p; ++p) narrow.push_back(static_cast<char>(*p));
+
+    DWORD written = 0;
+    SetFilePointer(file, 0, nullptr, FILE_END);
+    WriteFile(file, narrow.c_str(), static_cast<DWORD>(narrow.size()), &written, nullptr);
+    CloseHandle(file);
+}
 
 // Propiedades que Windows consulta para decidir cómo encajar el APO en el
 // grafo. Una entrada/una salida, procesamiento in-place, y los tres "must
@@ -32,15 +78,14 @@ const APO_REG_PROPERTIES kRegProperties = {
 // Ruta del archivo de ajustes que escribe la app de escritorio. Compartir el
 // mismo archivo permite que la UI existente siga siendo el panel de control
 // del APO, sin duplicar interfaz.
+//
+// TIENE QUE SER ProgramData, no AppData: este codigo se ejecuta dentro de
+// audiodg.exe, que corre como SYSTEM. Pedir "la carpeta del usuario" aqui
+// devuelve la del perfil de SYSTEM
+// (C:\Windows\System32\config\systemprofile\...), donde el usuario no escribe
+// nunca -- el APO no veria jamas los ajustes y los sliders no harian nada.
 std::wstring settingsPath() {
-    PWSTR roaming = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roaming))) {
-        return L"";
-    }
-    std::wstring path(roaming);
-    CoTaskMemFree(roaming);
-    path += L"\\WarzoneAudioOptimizer\\settings.ini";
-    return path;
+    return L"C:\\ProgramData\\WarzoneAudioOptimizer\\settings.ini";
 }
 
 float readSetting(const std::wstring& path, const wchar_t* key, float fallback) {
@@ -75,7 +120,9 @@ bool isFloat32(const WAVEFORMATEX* format) {
 
 } // namespace
 
-WarzoneApoMfx::WarzoneApoMfx() = default;
+WarzoneApoMfx::WarzoneApoMfx() {
+    apoLog(L"APO instanciado por el motor de audio");
+}
 
 WarzoneApoMfx::~WarzoneApoMfx() {
     // Si el motor destruye el APO sin llamar a UnlockForProcess, el hilo
@@ -119,6 +166,9 @@ void WarzoneApoMfx::startSettingsWatcher() {
 
             lastWrite = current;
             loadUserSettings();
+            apoLog(L"Ajustes recargados: pasos=%.1fdB motores=%.1fdB brillo=%.1fdB",
+                   chain_.footstepBoostDb(), chain_.vehicleThresholdDb(),
+                   chain_.airGainDb());
         }
     });
 }
@@ -223,7 +273,16 @@ STDMETHODIMP WarzoneApoMfx::IsInputFormatSupported(
     if (!pRequestedInputFormat) return E_POINTER;
 
     const HRESULT hr = validateFormat(pRequestedInputFormat);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        const WAVEFORMATEX* w = waveFormatOf(pRequestedInputFormat);
+        if (w) {
+            apoLog(L"Formato de entrada RECHAZADO: tag=%u bits=%u canales=%u %uHz",
+                   w->wFormatTag, w->wBitsPerSample, w->nChannels, w->nSamplesPerSec);
+        } else {
+            apoLog(L"Formato de entrada RECHAZADO: no se pudo leer");
+        }
+        return hr;
+    }
 
     // El formato pedido sirve tal cual. Devolverlo es opcional cuando el
     // resultado es S_OK, pero el motor puede pedirlo: le pasamos el mismo.
@@ -324,6 +383,9 @@ STDMETHODIMP WarzoneApoMfx::LockForProcess(
     loadUserSettings();
     startSettingsWatcher();
 
+    apoLog(L"PROCESANDO: %u canales @ %uHz, bloques de hasta %u frames",
+           channelCount_, sampleRate_, maxFrameCount_);
+
     locked_ = true;
     return S_OK;
 }
@@ -350,6 +412,17 @@ void WarzoneApoMfx::loadUserSettings() {
 
 void WarzoneApoMfx::loadUserSettingsImpl() {
     const std::wstring path = settingsPath();
+
+    // Que el APO vea o no el archivo del usuario es la diferencia entre
+    // "los sliders no hacen nada" y "funcionan": conviene dejarlo por escrito.
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        const bool exists = !path.empty() &&
+            GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+        apoLog(L"Ajustes en \"%s\" -> %s", path.c_str(),
+               exists ? L"encontrados" : L"NO EXISTE (se usan valores por defecto)");
+    }
 
     // Si el archivo no existe todavía (el usuario nunca abrió la app), cada
     // ajuste cae a su valor por defecto -- los mismos que usa la app.

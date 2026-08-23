@@ -390,6 +390,43 @@ if (Test-Path $AudioKey) {
 Set-ItemProperty -Path $BackupKey -Name 'HadDisableFlag' -Value ([int]($null -ne $originalDisable))
 
 # ---------------------------------------------------------------------------
+# 3b. Carpeta de ajustes compartida
+#
+# El APO corre dentro de audiodg.exe COMO SYSTEM, asi que no puede leer el
+# AppData del usuario: los ajustes tienen que vivir en un sitio comun. Y como
+# quien escribe es la app (sin elevar) mientras quien lee es SYSTEM, hay que
+# garantizar explicitamente que el usuario pueda escribir ahi -- si la carpeta
+# la crease SYSTEM sin mas, el usuario podria quedarse sin permiso y los
+# sliders dejarian de guardar sin ningun aviso.
+# ---------------------------------------------------------------------------
+Write-Step 'Preparando la carpeta de ajustes compartida...'
+
+$SettingsDir = 'C:\ProgramData\WarzoneAudioOptimizer'
+if (-not (Test-Path $SettingsDir)) {
+    New-Item -ItemType Directory -Path $SettingsDir -Force | Out-Null
+}
+try {
+    $acl = Get-Acl $SettingsDir
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        'BUILTIN\Users', 'Modify',
+        'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $SettingsDir -AclObject $acl
+    Write-Ok "Carpeta lista: $SettingsDir (escritura para usuarios)"
+} catch {
+    Write-Warn "No se pudieron ajustar permisos: $($_.Exception.Message)"
+    Write-Warn 'Si los sliders no guardan, revisa los permisos de esa carpeta.'
+}
+
+# Migrar los ajustes que el usuario ya tuviera en la ubicacion antigua.
+$legacy = Join-Path $env:APPDATA 'WarzoneAudioOptimizer\settings.ini'
+$target = Join-Path $SettingsDir 'settings.ini'
+if ((Test-Path $legacy) -and -not (Test-Path $target)) {
+    Copy-Item $legacy $target -Force -ErrorAction SilentlyContinue
+    if (Test-Path $target) { Write-Ok 'Ajustes existentes migrados' }
+}
+
+# ---------------------------------------------------------------------------
 # 4. Instalar y registrar la DLL
 # ---------------------------------------------------------------------------
 Write-Step 'Instalando la DLL...'

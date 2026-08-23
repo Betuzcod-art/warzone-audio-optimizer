@@ -180,18 +180,26 @@ float normToValue(const SliderSpec& spec, float norm) {
 // -----------------------------------------------------------------------------
 constexpr wchar_t kSettingsSection[] = L"Ajustes";
 
+// Los ajustes viven en ProgramData, no en AppData del usuario, porque el APO
+// los lee desde audiodg.exe, que corre como SYSTEM: alli "la carpeta del
+// usuario" es el perfil de SYSTEM y jamas veria este archivo.
 std::wstring settingsFilePath(bool createDirectory) {
-    wchar_t appData[MAX_PATH]{};
-    const DWORD length = GetEnvironmentVariableW(L"APPDATA", appData,
-                                                  static_cast<DWORD>(std::size(appData)));
-    if (length == 0 || length >= std::size(appData)) return L"";
-
-    const std::wstring directory = std::wstring(appData) + L"\\WarzoneAudioOptimizer";
+    const std::wstring directory = L"C:\\ProgramData\\WarzoneAudioOptimizer";
     if (createDirectory) {
         // Falla silenciosamente si ya existe, que es el caso normal.
         CreateDirectoryW(directory.c_str(), nullptr);
     }
     return directory + L"\\settings.ini";
+}
+
+// Ubicacion anterior (AppData del usuario). Solo se usa para no perder los
+// ajustes de quien ya tenia la app configurada.
+std::wstring legacySettingsFilePath() {
+    wchar_t appData[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"APPDATA", appData,
+                                                  static_cast<DWORD>(std::size(appData)));
+    if (length == 0 || length >= std::size(appData)) return L"";
+    return std::wstring(appData) + L"\\WarzoneAudioOptimizer\\settings.ini";
 }
 
 void saveSettings(const AppState& state) {
@@ -207,7 +215,18 @@ void saveSettings(const AppState& state) {
 }
 
 void loadSettings(AppState& state) {
-    const std::wstring path = settingsFilePath(/*createDirectory*/ false);
+    std::wstring path = settingsFilePath(/*createDirectory*/ false);
+
+    // Si todavia no hay ajustes en la ubicacion nueva pero si en la antigua,
+    // se leen de alli: cambiar donde se guardan no debe costarle al usuario
+    // los ajustes que ya habia afinado.
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const std::wstring legacy = legacySettingsFilePath();
+        if (!legacy.empty() &&
+            GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            path = legacy;
+        }
+    }
 
     for (int i = 0; i < kSliderCount; ++i) {
         const SliderSpec& spec = kSliders[i];
