@@ -206,15 +206,25 @@ if ($backup -and $backup.HadDisableFlag -eq 1) {
 # ---------------------------------------------------------------------------
 Write-Step 'Desregistrando la DLL...'
 
+# La DLL vive en System32 (unico sitio desde el que audiodg.exe la carga);
+# la copia de Program Files es solo de referencia.
+$systemDll = Join-Path $env:SystemRoot "System32\$DllName"
 $targetDll = Join-Path $InstallDir $DllName
-if (Test-Path $targetDll) {
+
+if (Test-Path $systemDll) {
+    Start-Process -FilePath 'regsvr32.exe' -ArgumentList '/s', '/u', "`"$systemDll`"" -Wait -ErrorAction SilentlyContinue
+    Write-Ok 'COM desregistrado'
+} elseif (Test-Path $targetDll) {
     Start-Process -FilePath 'regsvr32.exe' -ArgumentList '/s', '/u', "`"$targetDll`"" -Wait -ErrorAction SilentlyContinue
     Write-Ok 'COM desregistrado'
 } else {
     Write-Warn 'La DLL ya no estaba en su sitio'
-    # Aun asi limpiamos el registro por si quedo huerfano.
-    Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\CLSID\$ApoClsid" -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# Limpiar el registro ante el motor de audio y el CLSID, por si quedaron
+# huerfanos (regsvr32 /u no siempre alcanza la rama del motor).
+Remove-Item -Path "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$ApoClsid" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "HKLM:\SOFTWARE\Classes\CLSID\$ApoClsid" -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
 # 5. Recargar el motor de audio
@@ -231,12 +241,14 @@ try {
 
 # El borrado va DESPUES del reinicio: mientras audiodg tenga la DLL cargada,
 # el archivo esta bloqueado y no se puede eliminar.
-if (Test-Path $targetDll) {
-    Remove-Item $targetDll -Force -ErrorAction SilentlyContinue
-    if (Test-Path $targetDll) {
-        Write-Warn 'La DLL sigue bloqueada; se podra borrar tras reiniciar Windows.'
-    } else {
-        Write-Ok 'DLL eliminada'
+foreach ($dll in @($systemDll, $targetDll)) {
+    if (Test-Path $dll) {
+        Remove-Item $dll -Force -ErrorAction SilentlyContinue
+        if (Test-Path $dll) {
+            Write-Warn "Sigue bloqueada, se borrara al reiniciar Windows: $dll"
+        } else {
+            Write-Ok "DLL eliminada: $dll"
+        }
     }
 }
 

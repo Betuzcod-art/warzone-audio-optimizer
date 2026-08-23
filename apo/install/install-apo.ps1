@@ -473,12 +473,40 @@ if (Test-Path $target) {
 # ---------------------------------------------------------------------------
 Write-Step 'Instalando la DLL...'
 
+# La DLL va a System32, no a Program Files.
+#
+# audiodg.exe corre como SYSTEM con un token muy restringido, y no carga
+# binarios desde cualquier sitio. Todos los ejemplos de APO de Microsoft los
+# ponen en System32 (%SystemRoot%\System32\swapapo.dll) por este motivo. Con
+# la DLL en Program Files, el objeto COM se instanciaba bien desde una app
+# normal pero el motor de audio no lo cargaba nunca.
+$targetDll = Join-Path $env:SystemRoot "System32\$DllName"
+
+# Copia previa en Program Files: sirve de referencia para el desinstalador y
+# para saber que version esta puesta.
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
-$targetDll = Join-Path $InstallDir $DllName
-Copy-Item $sourceDll $targetDll -Force
-Write-Ok "Copiada a $targetDll"
+Copy-Item $sourceDll (Join-Path $InstallDir $DllName) -Force -ErrorAction SilentlyContinue
+
+try {
+    Copy-Item $sourceDll $targetDll -Force -ErrorAction Stop
+    Write-Ok "Copiada a $targetDll"
+} catch {
+    # Si la DLL ya estaba cargada por audiodg, el archivo esta bloqueado.
+    Write-Warn 'La DLL estaba en uso; se reemplaza tras reiniciar el audio...'
+    Stop-Service -Name 'AudioEndpointBuilder' -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    try {
+        Copy-Item $sourceDll $targetDll -Force -ErrorAction Stop
+        Write-Ok "Copiada a $targetDll"
+    } catch {
+        Write-Err "No se pudo copiar a System32: $($_.Exception.Message)"
+        Start-Service -Name 'AudioEndpointBuilder' -ErrorAction SilentlyContinue
+        exit 1
+    }
+    Start-Service -Name 'AudioEndpointBuilder' -ErrorAction SilentlyContinue
+}
 
 $regsvr = Start-Process -FilePath 'regsvr32.exe' -ArgumentList '/s', "`"$targetDll`"" -Wait -PassThru
 if ($regsvr.ExitCode -ne 0) {
@@ -486,6 +514,63 @@ if ($regsvr.ExitCode -ne 0) {
     exit 1
 }
 Write-Ok 'COM registrado'
+
+# ---------------------------------------------------------------------------
+# Registro ante el MOTOR DE AUDIO.
+#
+# Asignar el CLSID a un dispositivo no basta: Windows tambien necesita esta
+# ficha para saber COMO instanciar el APO (cuantas conexiones acepta, que
+# interfaces expone, cuantas instancias permite). Sin ella ve la asignacion,
+# no sabe que hacer con ella, y la ignora en silencio -- el sintoma es un APO
+# perfectamente instalado que nunca llega a cargarse.
+#
+# Se hace aqui y no en DllRegisterServer porque esta rama del registro
+# tambien esta protegida: regsvr32 no siempre puede escribirla, y fallaba sin
+# avisar.
+# ---------------------------------------------------------------------------
+Write-Step 'Registrando el APO ante el motor de audio...'
+
+# La ruta correcta es SOFTWARE\Classes\AudioEngine\..., no la que aparece en
+# los ejemplos de INF de la documentacion (MMDevices\Audio\AudioEngine\...):
+# esa ni siquiera existe en Windows 11. Se confirmo mirando donde esta
+# registrado un APO que si funciona en esta maquina.
+$EngineKey = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$ApoClsid"
+
+# IID de IAudioProcessingObject: la interfaz que el motor pide primero.
+$IidAudioProcessingObject = '{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}'
+
+# APO_FLAG_INPLACE(1) | SAMPLESPERFRAME(2) | FRAMESPERSECOND(4) | BITSPERSAMPLE(8)
+$ApoFlags = 15
+
+try {
+    if (-not (Test-Path $EngineKey)) { New-Item -Path $EngineKey -Force | Out-Null }
+
+    New-ItemProperty -Path $EngineKey -Name 'FriendlyName' -Value 'Warzone Audio Optimizer' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'Copyright' -Value 'Warzone Audio Optimizer' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'MajorVersion' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'MinorVersion' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'Flags' -Value $ApoFlags -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'MinInputConnections' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'MaxInputConnections' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'MinOutputConnections' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'MaxOutputConnections' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'MaxInstances' -Value 0xFFFFFFFF -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'NumAPOInterfaces' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $EngineKey -Name 'APOInterface0' -Value $IidAudioProcessingObject -PropertyType String -Force | Out-Null
+
+    # Verificar de verdad: este es exactamente el punto donde antes fallaba
+    # sin decir nada.
+    $check = Get-ItemProperty -Path $EngineKey -ErrorAction SilentlyContinue
+    if ($check -and $check.APOInterface0 -eq $IidAudioProcessingObject) {
+        Write-Ok 'APO registrado ante el motor de audio (12 valores)'
+    } else {
+        Write-Err 'El registro ante el motor no quedo completo.'
+        Write-Err 'Windows no podra instanciar el APO.'
+    }
+} catch {
+    Write-Err "No se pudo registrar ante el motor: $($_.Exception.Message)"
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # 5. Aplicar la configuracion de audio

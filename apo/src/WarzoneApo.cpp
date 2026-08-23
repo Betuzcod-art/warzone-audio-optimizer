@@ -286,6 +286,13 @@ STDMETHODIMP WarzoneApoMfx::IsInputFormatSupported(
 
     // El formato pedido sirve tal cual. Devolverlo es opcional cuando el
     // resultado es S_OK, pero el motor puede pedirlo: le pasamos el mismo.
+    {
+        const WAVEFORMATEX* w = waveFormatOf(pRequestedInputFormat);
+        if (w) {
+            apoLog(L"Formato de entrada ACEPTADO: bits=%u canales=%u %uHz",
+                   w->wBitsPerSample, w->nChannels, w->nSamplesPerSec);
+        }
+    }
     if (ppSupportedInputFormat) {
         pRequestedInputFormat->AddRef();
         *ppSupportedInputFormat = pRequestedInputFormat;
@@ -329,12 +336,20 @@ STDMETHODIMP WarzoneApoMfx::LockForProcess(
     UINT32 u32NumOutputConnections,
     APO_CONNECTION_DESCRIPTOR** ppOutputConnections) {
 
-    if (locked_) return APOERR_ALREADY_INITIALIZED;
+    apoLog(L"LockForProcess: %u entradas, %u salidas",
+           u32NumInputConnections, u32NumOutputConnections);
+
+    if (locked_) {
+        apoLog(L"  rechazado: ya estaba bloqueado");
+        return APOERR_ALREADY_INITIALIZED;
+    }
     if (u32NumInputConnections != 1 || u32NumOutputConnections != 1) {
+        apoLog(L"  rechazado: numero de conexiones no soportado");
         return APOERR_NUM_CONNECTIONS_INVALID;
     }
     if (!ppInputConnections || !ppOutputConnections ||
         !ppInputConnections[0] || !ppOutputConnections[0]) {
+        apoLog(L"  rechazado: descriptores nulos");
         return E_POINTER;
     }
 
@@ -342,9 +357,23 @@ STDMETHODIMP WarzoneApoMfx::LockForProcess(
     const APO_CONNECTION_DESCRIPTOR* output = ppOutputConnections[0];
 
     HRESULT hr = validateFormat(input->pFormat);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        const WAVEFORMATEX* w = waveFormatOf(input->pFormat);
+        if (w) {
+            apoLog(L"  rechazado: formato de ENTRADA bits=%u canales=%u %uHz",
+                   w->wBitsPerSample, w->nChannels, w->nSamplesPerSec);
+        }
+        return hr;
+    }
     hr = validateFormat(output->pFormat);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        const WAVEFORMATEX* w = waveFormatOf(output->pFormat);
+        if (w) {
+            apoLog(L"  rechazado: formato de SALIDA bits=%u canales=%u %uHz",
+                   w->wBitsPerSample, w->nChannels, w->nSamplesPerSec);
+        }
+        return hr;
+    }
 
     const WAVEFORMATEX* inputWave = waveFormatOf(input->pFormat);
     const WAVEFORMATEX* outputWave = waveFormatOf(output->pFormat);
