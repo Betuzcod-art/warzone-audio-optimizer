@@ -405,10 +405,15 @@ $SettingsDir = 'C:\ProgramData\WarzoneAudioOptimizer'
 if (-not (Test-Path $SettingsDir)) {
     New-Item -ItemType Directory -Path $SettingsDir -Force | Out-Null
 }
+# El grupo "Usuarios" se llama distinto en cada idioma de Windows (Users,
+# Usuarios, Utilisateurs...). Usar el nombre literal falla fuera del ingles,
+# y encima falla en silencio. El SID S-1-5-32-545 es el mismo en todos.
+$UsersSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')
+
 try {
     $acl = Get-Acl $SettingsDir
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-        'BUILTIN\Users', 'Modify',
+        $UsersSid, 'Modify',
         'ContainerInherit,ObjectInherit', 'None', 'Allow')
     $acl.SetAccessRule($rule)
     Set-Acl -Path $SettingsDir -AclObject $acl
@@ -437,10 +442,22 @@ if (Test-Path $target) {
     try {
         $fileAcl = Get-Acl $target
         $fileRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            'BUILTIN\Users', 'Modify', 'Allow')
+            $UsersSid, 'Modify', 'Allow')
         $fileAcl.SetAccessRule($fileRule)
         Set-Acl -Path $target -AclObject $fileAcl
-        Write-Ok 'El archivo de ajustes es escribible por el usuario'
+
+        # Verificar de verdad, no dar por hecho que Set-Acl basto: este es el
+        # punto exacto donde un fallo silencioso deja los sliders sin efecto.
+        $check = (Get-Acl $target).Access | Where-Object {
+            $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) -eq $UsersSid -and
+            $_.FileSystemRights -match 'Modify|FullControl|Write'
+        }
+        if ($check) {
+            Write-Ok 'El archivo de ajustes es escribible por el usuario'
+        } else {
+            Write-Warn 'Los permisos del archivo no quedaron aplicados.'
+            Write-Warn 'Los sliders no llegaran al APO hasta arreglarlo.'
+        }
     } catch {
         Write-Warn "No se pudieron ajustar permisos del archivo: $($_.Exception.Message)"
     }
