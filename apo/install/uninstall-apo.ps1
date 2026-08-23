@@ -172,12 +172,13 @@ if ($backup -and $backup.EndpointGuid) {
 # y es un sintoma dificil de diagnosticar despues.
 Write-Step 'Comprobando si Windows desactivo los efectos del dispositivo...'
 
+# La clave vive en FxProperties, no en Properties.
 $reenabled = 0
 Get-ChildItem $RenderRoot -ErrorAction SilentlyContinue | ForEach-Object {
-    $props = Get-ItemProperty -Path (Join-Path $_.PSPath 'Properties') -ErrorAction SilentlyContinue
+    $props = Get-ItemProperty -Path (Join-Path $_.PSPath 'FxProperties') -ErrorAction SilentlyContinue
     if ($props -and $props.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
         if ($props.$PkeyDisableSysFx -ne 0) {
-            if (Set-AudioRegistryValue $_.PSChildName 'Properties' $PkeyDisableSysFx 0 ([Microsoft.Win32.RegistryValueKind]::DWord)) {
+            if (Set-AudioRegistryValue $_.PSChildName 'FxProperties' $PkeyDisableSysFx 0 ([Microsoft.Win32.RegistryValueKind]::DWord)) {
                 $script:reenabled++
             }
         }

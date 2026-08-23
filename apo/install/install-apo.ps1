@@ -78,10 +78,15 @@ $SlotPreference = @(
     @{ Key = $PkeyStreamEffect; Name = 'SFX (por stream)' }
 )
 
-# PKEY_AudioEndpoint_Disable_SysFx. Windows la pone a 1 automaticamente si un
-# APO falla al cargar repetidamente (10 veces), y entonces DESACTIVA todos los
-# efectos del dispositivo. Hay que vigilarla: explica el clasico "instale algo
-# y ahora no funciona ningun efecto".
+# PKEY_AudioEndpoint_Disable_SysFx: a 1 significa "no apliques NINGUN efecto
+# en este dispositivo", y Windows ignora entonces cualquier APO instalado.
+# Se pone sola si un APO falla al cargar repetidamente, y tambien al desmarcar
+# las mejoras de audio del dispositivo.
+#
+# OJO: vive en FxProperties, NO en Properties. Buscarla en Properties (donde
+# uno esperaria, y donde la buscaba este script) no da error: simplemente no
+# aparece nunca, y el diagnostico dice "efectos activos" mientras estan
+# apagados. Costo horas.
 $PkeyDisableSysFx = '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},5'
 
 function Write-Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
@@ -593,17 +598,29 @@ if (-not (Set-AudioRegistryValue -EndpointGuid $device.Guid -SubKeyName 'FxPrope
 }
 Write-Ok "APO asociado a $($device.Name) en $targetSlotName"
 
-# Si una instalacion anterior dejo los efectos desactivados, limpiarlo: si no,
-# el APO cargaria bien pero Windows lo ignoraria igualmente.
-$deviceProps = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
-if ($deviceProps -and $deviceProps.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
-    if ($deviceProps.$PkeyDisableSysFx -ne 0) {
-        if (Set-AudioRegistryValue -EndpointGuid $device.Guid -SubKeyName 'Properties' `
-                                    -ValueName $PkeyDisableSysFx -Value 0 `
-                                    -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)) {
-            Write-Ok 'Se reactivaron los efectos del dispositivo (estaban desactivados)'
+# Asegurar que el dispositivo tiene los efectos ACTIVADOS. Sin esto, Windows
+# ignora el APO por completo aunque este perfectamente instalado y registrado.
+# Se escribe siempre, no solo si la clave ya existe: puede faltar y aun asi
+# heredar el comportamiento desactivado.
+$fxNow = Get-ItemProperty -Path $fxPath -ErrorAction SilentlyContinue
+$sysFxValue = if ($fxNow -and $fxNow.PSObject.Properties.Name -contains $PkeyDisableSysFx) {
+    $fxNow.$PkeyDisableSysFx
+} else { $null }
+
+if ($sysFxValue -ne 0) {
+    if (Set-AudioRegistryValue -EndpointGuid $device.Guid -SubKeyName 'FxProperties' `
+                                -ValueName $PkeyDisableSysFx -Value 0 `
+                                -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)) {
+        if ($null -eq $sysFxValue) {
+            Write-Ok 'Efectos del dispositivo habilitados explicitamente'
+        } else {
+            Write-Ok "Efectos REACTIVADOS (estaban desactivados: valor $sysFxValue)"
         }
+    } else {
+        Write-Warn 'No se pudo habilitar los efectos; Windows ignorara el APO.'
     }
+} else {
+    Write-Ok 'Los efectos del dispositivo ya estaban activos'
 }
 
 # ---------------------------------------------------------------------------
