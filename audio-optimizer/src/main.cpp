@@ -218,6 +218,24 @@ bool saveSettings(const AppState& state) {
             allOk = false;
         }
     }
+
+    // Windows cachea los archivos INI, y ese cache se queda pegado al primer
+    // resultado: si el archivo estaba bloqueado cuando arranco la app, seguiria
+    // fallando aunque despues se arreglen los permisos, hasta reiniciarla.
+    // Esta llamada con todo a NULL vacia el cache al disco.
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
+
+    // Y el APO solo detecta cambios por la FECHA del archivo: si Windows
+    // decidiera no tocarla, el cambio pasaria desapercibido.
+    HANDLE file = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        SetFileTime(file, nullptr, nullptr, &now);
+        CloseHandle(file);
+    }
+
     return allOk;
 }
 
