@@ -23,11 +23,26 @@
     4. Si algo sale mal y te quedas sin audio, ejecuta uninstall-apo.ps1.
        El script guarda los valores originales antes de tocarlos.
 
+.PARAMETER DeviceGuid
+    Endpoint donde instalar, en formato {....}. Si se indica, se salta la
+    seleccion interactiva. La app lo usa para mover el APO de dispositivo
+    sin obligar al usuario a elegir de una lista en la consola.
+
+.PARAMETER Unattended
+    Da por aceptadas las confirmaciones. Solo tiene efecto junto a
+    -DeviceGuid: la app ya ha mostrado el aviso en su propia interfaz, asi
+    que repetirlo en la consola solo estorba.
+
 .NOTES
     Requiere ejecutarse como Administrador.
 #>
 
 #Requires -RunAsAdministrator
+
+param(
+    [string] $DeviceGuid,
+    [switch] $Unattended
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -112,17 +127,23 @@ Write-Host @'
 ================================================================
 '@ -ForegroundColor White
 
-Write-Warn 'Este instalador desactiva la verificacion de firma de APOs de Windows'
-Write-Warn '(DisableProtectedAudioDG). Es necesario para cargar un APO sin firmar.'
-Write-Warn 'No se toca Secure Boot. El riesgo frente a anti-cheat es tuyo.'
-Write-Host ''
-Write-Warn 'TEN A MANO uninstall-apo.ps1 antes de continuar: si algo falla,'
-Write-Warn 'es lo que te devuelve el audio.'
-Write-Host ''
-$confirm = Read-Host 'Escribe ACEPTO para continuar'
-if ($confirm -ne 'ACEPTO') {
-    Write-Host 'Cancelado. No se ha modificado nada.' -ForegroundColor Red
-    exit 1
+$skipPrompts = $Unattended -and $DeviceGuid
+
+if (-not $skipPrompts) {
+    Write-Warn 'Este instalador desactiva la verificacion de firma de APOs de Windows'
+    Write-Warn '(DisableProtectedAudioDG). Es necesario para cargar un APO sin firmar.'
+    Write-Warn 'No se toca Secure Boot. El riesgo frente a anti-cheat es tuyo.'
+    Write-Host ''
+    Write-Warn 'TEN A MANO uninstall-apo.ps1 antes de continuar: si algo falla,'
+    Write-Warn 'es lo que te devuelve el audio.'
+    Write-Host ''
+    $confirm = Read-Host 'Escribe ACEPTO para continuar'
+    if ($confirm -ne 'ACEPTO') {
+        Write-Host 'Cancelado. No se ha modificado nada.' -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host '  Modo desatendido (lanzado desde la aplicacion)' -ForegroundColor DarkGray
 }
 
 # ---------------------------------------------------------------------------
@@ -257,34 +278,46 @@ if ($devices.Count -eq 0) {
     exit 1
 }
 
-Write-Host ''
-for ($i = 0; $i -lt $devices.Count; $i++) {
-    $d = $devices[$i]
-    Write-Host ("  [{0}] {1}" -f $i, $d.Name) -ForegroundColor White
-    # El id corto desempata cuando dos dispositivos comparten nombre.
-    Write-Host ("      id: {0}" -f $d.Guid.Substring(1, 8)) -ForegroundColor DarkGray
-    if ($d.Occupied.Count -gt 0) {
-        Write-Host ("      efectos del fabricante: {0}" -f ($d.Occupied -join ', ')) -ForegroundColor DarkGray
-    }
-    if ($d.FreeSlot) {
-        Write-Host ("      -> se instalara en {0}, sin tocar lo existente" -f $d.FreeSlot.Name) -ForegroundColor Green
-    } else {
-        Write-Host "      -> sin slots libres: habria que REEMPLAZAR un efecto" -ForegroundColor Yellow
-    }
-}
-Write-Host ''
-Write-Warn 'Elige el dispositivo por el que escuchas REALMENTE (tus auriculares).'
-Write-Warn 'Si tienes software de audio como SteelSeries Sonar, elegir uno de sus'
-Write-Warn 'dispositivos virtuales puede dar resultados raros: prefiere el fisico.'
-$choice = Read-Host 'Numero de dispositivo'
+$device = $null
 
-$index = 0
-if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 0 -or $index -ge $devices.Count) {
-    Write-Err 'Seleccion invalida.'
-    exit 1
+if ($DeviceGuid) {
+    # Seleccion por parametro: la app ya sabe que dispositivo quiere.
+    $device = $devices | Where-Object { $_.Guid -eq $DeviceGuid } | Select-Object -First 1
+    if (-not $device) {
+        Write-Err "El dispositivo $DeviceGuid no existe o no esta activo."
+        exit 1
+    }
+    Write-Ok "Dispositivo indicado: $($device.Name)"
+} else {
+    Write-Host ''
+    for ($i = 0; $i -lt $devices.Count; $i++) {
+        $d = $devices[$i]
+        Write-Host ("  [{0}] {1}" -f $i, $d.Name) -ForegroundColor White
+        # El id corto desempata cuando dos dispositivos comparten nombre.
+        Write-Host ("      id: {0}" -f $d.Guid.Substring(1, 8)) -ForegroundColor DarkGray
+        if ($d.Occupied.Count -gt 0) {
+            Write-Host ("      efectos del fabricante: {0}" -f ($d.Occupied -join ', ')) -ForegroundColor DarkGray
+        }
+        if ($d.FreeSlot) {
+            Write-Host ("      -> se instalara en {0}, sin tocar lo existente" -f $d.FreeSlot.Name) -ForegroundColor Green
+        } else {
+            Write-Host "      -> sin slots libres: habria que REEMPLAZAR un efecto" -ForegroundColor Yellow
+        }
+    }
+    Write-Host ''
+    Write-Warn 'Elige el dispositivo por el que escuchas REALMENTE (tus auriculares).'
+    Write-Warn 'Si tienes software de audio como SteelSeries Sonar, elegir uno de sus'
+    Write-Warn 'dispositivos virtuales puede dar resultados raros: prefiere el fisico.'
+    $choice = Read-Host 'Numero de dispositivo'
+
+    $index = 0
+    if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 0 -or $index -ge $devices.Count) {
+        Write-Err 'Seleccion invalida.'
+        exit 1
+    }
+    $device = $devices[$index]
+    Write-Ok "Seleccionado: $($device.Name)"
 }
-$device = $devices[$index]
-Write-Ok "Seleccionado: $($device.Name)"
 
 # Decidir en que slot entramos.
 if ($device.FreeSlot) {
@@ -308,6 +341,13 @@ if ($device.FreeSlot) {
     Write-Warn 'etc.), lo perderias mientras el APO este instalado -- y es justo'
     Write-Warn 'lo que ayuda a ubicar los pasos. Piensalo antes de aceptar.'
     Write-Warn 'El desinstalador lo restaura tal cual.'
+    if ($skipPrompts) {
+        # Reemplazar un efecto del fabricante es una decision con consecuencias
+        # audibles: nunca se toma sola, ni siquiera en modo desatendido.
+        Write-Err 'Cancelado: se necesita confirmacion para reemplazar un efecto.'
+        Write-Err 'Ejecuta este script a mano si de verdad quieres ese dispositivo.'
+        exit 2
+    }
     $ok = Read-Host 'Reemplazarlo de todas formas? (S/N)'
     if ($ok -notmatch '^[SsYy]') {
         Write-Host 'Cancelado. No se ha modificado nada.' -ForegroundColor Red

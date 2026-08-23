@@ -16,8 +16,11 @@
 #pragma once
 
 #include <windows.h>
+#include <mmdeviceapi.h>
+#include <wrl/client.h>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace audiopt {
 
@@ -30,6 +33,16 @@ struct ApoStatus {
     bool attached = false;        // Ademas, esta asociada a algun dispositivo
     std::wstring deviceName;      // Dispositivo donde esta asociada
     std::wstring slotName;        // SFX / MFX / EFX
+    std::wstring deviceGuid;      // Endpoint donde esta asociada
+};
+
+// Un dispositivo de salida activo, tal como se lo ofrecemos al usuario.
+struct RenderDevice {
+    std::wstring guid;        // Clave del endpoint, {....}
+    std::wstring name;        // Nombre visible
+    std::wstring adapter;     // Tarjeta/driver: lo que distingue tres "Altavoces"
+    bool hasApo = false;      // El APO esta puesto aqui
+    bool isDefault = false;   // Es la salida predeterminada de Windows
 };
 
 namespace apodetail {
@@ -116,6 +129,7 @@ inline ApoStatus queryApoStatus() {
                     L"{a45c254e-df1c-4efd-8020-67d146a850e0},2");
             }
             status.deviceName = friendly.empty() ? L"(dispositivo)" : friendly;
+            status.deviceGuid = endpointName;
             break;
         }
         if (status.attached) break;
@@ -123,6 +137,113 @@ inline ApoStatus queryApoStatus() {
 
     RegCloseKey(renderKey);
     return status;
+}
+
+namespace apodetail {
+
+// GUID del endpoint predeterminado de Windows, o "" si no se puede saber.
+// El id que devuelve WASAPI es del tipo "{0.0.0.00000000}.{guid}", asi que
+// nos quedamos con la ultima llave, que es la clave del registro.
+inline std::wstring defaultRenderEndpointGuid() {
+    Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                 __uuidof(IMMDeviceEnumerator),
+                                 reinterpret_cast<void**>(enumerator.GetAddressOf())))) {
+        return L"";
+    }
+    Microsoft::WRL::ComPtr<IMMDevice> device;
+    if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf()))) {
+        return L"";
+    }
+    LPWSTR rawId = nullptr;
+    if (FAILED(device->GetId(&rawId)) || !rawId) return L"";
+
+    std::wstring id(rawId);
+    CoTaskMemFree(rawId);
+
+    const size_t open = id.find_last_of(L'{');
+    if (open == std::wstring::npos) return L"";
+    return id.substr(open);
+}
+
+} // namespace apodetail
+
+// Lista los dispositivos de salida activos, marcando cual tiene el APO y
+// cual es el predeterminado de Windows. Solo lectura.
+inline std::vector<RenderDevice> enumerateRenderDevices() {
+    std::vector<RenderDevice> devices;
+
+    const std::wstring renderRoot =
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render";
+    HKEY renderKey = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, renderRoot.c_str(), 0, KEY_READ, &renderKey)
+            != ERROR_SUCCESS) {
+        return devices;
+    }
+
+    const ApoStatus status = queryApoStatus();
+    const std::wstring defaultGuid = apodetail::defaultRenderEndpointGuid();
+
+    wchar_t endpointName[256]{};
+    DWORD index = 0;
+    DWORD nameSize = static_cast<DWORD>(std::size(endpointName));
+    while (RegEnumKeyExW(renderKey, index, endpointName, &nameSize,
+                          nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
+        ++index;
+        nameSize = static_cast<DWORD>(std::size(endpointName));
+
+        const std::wstring endpointBase = renderRoot + L"\\" + endpointName;
+
+        // Solo dispositivos activos: los desconectados o deshabilitados solo
+        // servirian para elegir mal.
+        DWORD state = 0;
+        DWORD stateSize = sizeof(state);
+        HKEY endpointKey = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, endpointBase.c_str(), 0, KEY_READ, &endpointKey)
+                == ERROR_SUCCESS) {
+            DWORD type = 0;
+            RegQueryValueExW(endpointKey, L"DeviceState", nullptr, &type,
+                             reinterpret_cast<BYTE*>(&state), &stateSize);
+            RegCloseKey(endpointKey);
+        }
+        if (state != 1) continue;
+
+        const std::wstring propsKey = endpointBase + L"\\Properties";
+
+        RenderDevice device;
+        device.guid = endpointName;
+        device.name = apodetail::readRegString(HKEY_LOCAL_MACHINE, propsKey,
+            L"{a45c254e-df1c-4efd-8020-67d146a850e0},14");
+        if (device.name.empty()) {
+            device.name = apodetail::readRegString(HKEY_LOCAL_MACHINE, propsKey,
+                L"{a45c254e-df1c-4efd-8020-67d146a850e0},2");
+        }
+        if (device.name.empty()) device.name = L"(sin nombre)";
+
+        // El adaptador es lo que permite distinguir varios dispositivos que
+        // se llaman igual ("Altavoces" de la placa, del 7.1, del mando...).
+        device.adapter = apodetail::readRegString(HKEY_LOCAL_MACHINE, propsKey,
+            L"{b3f8fa53-0004-438e-9003-51a46e139bfc},6");
+
+        device.hasApo = (_wcsicmp(device.guid.c_str(), status.deviceGuid.c_str()) == 0) &&
+                        status.attached;
+        device.isDefault = !defaultGuid.empty() &&
+                           _wcsicmp(device.guid.c_str(), defaultGuid.c_str()) == 0;
+
+        devices.push_back(std::move(device));
+    }
+
+    RegCloseKey(renderKey);
+
+    // Orden util: primero donde esta el APO, luego el predeterminado, y el
+    // resto alfabetico -- asi lo relevante queda arriba.
+    std::sort(devices.begin(), devices.end(),
+              [](const RenderDevice& a, const RenderDevice& b) {
+                  if (a.hasApo != b.hasApo) return a.hasApo;
+                  if (a.isDefault != b.isDefault) return a.isDefault;
+                  return a.name < b.name;
+              });
+    return devices;
 }
 
 } // namespace audiopt

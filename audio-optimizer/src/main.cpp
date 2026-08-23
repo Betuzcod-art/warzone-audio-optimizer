@@ -20,6 +20,7 @@ constexpr wchar_t kWindowClass[] = L"WarzoneAudioOptimizerWindow";
 constexpr int kToggleControl = 1001;
 constexpr int kUpdateCheckControl = 1002;
 constexpr int kApoControl = 1003;
+constexpr int kDeviceComboControl = 1004;
 constexpr UINT_PTR kRefreshTimer = 1;
 constexpr UINT kUpdateResultMessage = WM_APP + 1;
 
@@ -98,9 +99,16 @@ const SliderSpec kSliders[kSliderCount] = {
     -12.0f,   6.0f,  0.0f,  kFormatDb, false},
 };
 
+// Selector del dispositivo por el que se escucha. Va sobre los sliders
+// porque es la decision que condiciona todo lo demas: si el APO no esta en
+// el dispositivo correcto, ajustar el sonido no sirve de nada.
+constexpr int kDeviceLabelY = 302;
+constexpr int kDeviceComboY = 322;
+constexpr int kDeviceComboHeight = 30;
+
 constexpr int kSliderX = 44;
 constexpr int kSliderWidth = 512;
-constexpr int kSliderFirstY = 322;
+constexpr int kSliderFirstY = 372;
 constexpr int kSliderSpacing = 58;
 constexpr int kSliderTrackHeight = 6;
 constexpr int kSliderThumbWidth = 12;
@@ -119,6 +127,8 @@ struct AppState {
     HWND toggleButton = nullptr;
     HWND updateButton = nullptr;
     HWND apoButton = nullptr;
+    HWND deviceCombo = nullptr;
+    std::vector<audiopt::RenderDevice> devices;
     bool active = false;
     ULONGLONG activatedAtMs = 0;
     bool baselineCaptured = false;
@@ -349,7 +359,38 @@ std::wstring findApoScript(const wchar_t* scriptName) {
     return L"";
 }
 
-bool runApoScript(HWND window, const wchar_t* scriptName) {
+// Texto de una entrada del selector. El adaptador es imprescindible: sin el,
+// tres dispositivos llamados "Altavoces" son indistinguibles.
+std::wstring describeDevice(const audiopt::RenderDevice& device) {
+    std::wstring text = device.name;
+    if (!device.adapter.empty() && device.adapter != device.name) {
+        text += L"  ·  " + device.adapter;
+    }
+    if (device.hasApo)    text += L"   [ACTIVO]";
+    else if (device.isDefault) text += L"   (predeterminado)";
+    return text;
+}
+
+void populateDeviceCombo(AppState& state) {
+    if (!state.deviceCombo) return;
+
+    state.devices = audiopt::enumerateRenderDevices();
+
+    SendMessageW(state.deviceCombo, CB_RESETCONTENT, 0, 0);
+    int selected = -1;
+    for (size_t i = 0; i < state.devices.size(); ++i) {
+        const std::wstring text = describeDevice(state.devices[i]);
+        SendMessageW(state.deviceCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(text.c_str()));
+        if (state.devices[i].hasApo) selected = static_cast<int>(i);
+    }
+    if (selected >= 0) {
+        SendMessageW(state.deviceCombo, CB_SETCURSEL, selected, 0);
+    }
+}
+
+bool runApoScript(HWND window, const wchar_t* scriptName,
+                  const std::wstring& extraArgs = L"") {
     const std::wstring script = findApoScript(scriptName);
     if (script.empty()) {
         MessageBoxW(window,
@@ -359,8 +400,9 @@ bool runApoScript(HWND window, const wchar_t* scriptName) {
         return false;
     }
 
-    const std::wstring params =
+    std::wstring params =
         L"-ExecutionPolicy Bypass -NoProfile -File \"" + script + L"\"";
+    if (!extraArgs.empty()) params += L" " + extraArgs;
 
     SHELLEXECUTEINFOW info{};
     info.cbSize = sizeof(info);
@@ -687,6 +729,8 @@ void paintWindow(HWND window, HDC dc) {
         drawText(dc,
                  L"Los sliders se aplican solos en 1 segundo, sin reiniciar nada",
                  44, 282, 12, kMuted);
+        drawText(dc, L"DISPOSITIVO POR EL QUE ESCUCHAS", kSliderX, kDeviceLabelY,
+                 12, kText, true);
         drawSliders(dc, *state);
         return;
     }
@@ -733,6 +777,12 @@ void paintWindow(HWND window, HDC dc) {
         L"  |  EQ pasos multibanda + control de motores/explosiones";
     drawText(dc, modeLine.c_str(), 44, 282, 12, kMuted);
 
+    // Sin APO el selector no cambia nada (el motor local usa su propia
+    // configuracion), asi que se rotula como informativo para no prometer
+    // un control que aqui no existe.
+    drawText(dc, L"DISPOSITIVOS DE SALIDA  (elige uno para instalar el APO ahi)",
+             kSliderX, kDeviceLabelY, 12, kMuted, true);
+
     drawSliders(dc, *state);
 }
 
@@ -753,6 +803,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 36, kButtonsY, 548, 54, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kToggleControl)),
                 GetModuleHandleW(nullptr), nullptr);
+            state->deviceCombo = CreateWindowExW(
+                0, L"COMBOBOX", nullptr,
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+                CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
+                kSliderX, kDeviceComboY, kSliderWidth, kDeviceComboHeight * 9,
+                window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDeviceComboControl)),
+                GetModuleHandleW(nullptr), nullptr);
             state->apoButton = CreateWindowExW(
                 0, L"BUTTON", L"INSTALAR MODO APO (SIN DELAY)",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -766,8 +824,18 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateCheckControl)),
                 GetModuleHandleW(nullptr), nullptr);
             refreshApoStatus(window, *state);
+            populateDeviceCombo(*state);
             SetTimer(window, kRefreshTimer, 1000, nullptr);
             return 0;
+
+        case WM_MEASUREITEM: {
+            auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+            if (measure->CtlID == kDeviceComboControl) {
+                measure->itemHeight = 26;
+                return TRUE;
+            }
+            break;
+        }
 
         case WM_LBUTTONDOWN: {
             if (!state) break;
@@ -807,6 +875,55 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case WM_COMMAND:
             if (LOWORD(wParam) == kToggleControl && HIWORD(wParam) == BN_CLICKED) {
                 toggleEngine(window);
+                return 0;
+            }
+            if (LOWORD(wParam) == kDeviceComboControl && HIWORD(wParam) == CBN_SELCHANGE) {
+                if (!state) return 0;
+                const int selection = static_cast<int>(
+                    SendMessageW(state->deviceCombo, CB_GETCURSEL, 0, 0));
+                if (selection < 0 || selection >= static_cast<int>(state->devices.size())) {
+                    return 0;
+                }
+                const audiopt::RenderDevice& target = state->devices[selection];
+
+                // Elegir el que ya tiene el APO no es un cambio: no molestamos
+                // con UAC para no hacer nada.
+                if (target.hasApo) return 0;
+
+                const std::wstring question =
+                    (state->apo.attached ? L"Mover el procesamiento a:\n\n    "
+                                         : L"Instalar el procesamiento en:\n\n    ") +
+                    describeDevice(target) +
+                    L"\n\nSe pedira permiso de administrador.";
+                if (MessageBoxW(window, question.c_str(), L"Cambiar dispositivo",
+                                MB_OKCANCEL | MB_ICONQUESTION) != IDOK) {
+                    // Devolver el selector a donde estaba: dejarlo marcando un
+                    // dispositivo que no es el activo seria mentir al usuario.
+                    populateDeviceCombo(*state);
+                    return 0;
+                }
+
+                const std::wstring args =
+                    L"-DeviceGuid \"" + target.guid + L"\" -Unattended";
+                runApoScript(window, L"install-apo.ps1", args);
+
+                refreshApoStatus(window, *state);
+                populateDeviceCombo(*state);
+
+                // Si no llego a moverse, decirlo: el caso tipico es un
+                // dispositivo sin slots libres, que el script rechaza a
+                // proposito para no apagar un efecto del fabricante.
+                if (!state->apo.attached ||
+                    _wcsicmp(state->apo.deviceGuid.c_str(), target.guid.c_str()) != 0) {
+                    MessageBoxW(window,
+                        L"No se pudo mover el procesamiento a ese dispositivo.\n\n"
+                        L"Suele pasar cuando el dispositivo no tiene ningun hueco "
+                        L"de efectos libre: instalar ahi apagaria un efecto del "
+                        L"fabricante (por ejemplo, el que crea el 7.1 virtual).\n\n"
+                        L"Para hacerlo de todas formas, ejecuta install-apo.ps1 "
+                        L"a mano y confirma el reemplazo.",
+                        L"Cambiar dispositivo", MB_OK | MB_ICONWARNING);
+                }
                 return 0;
             }
             if (LOWORD(wParam) == kApoControl && HIWORD(wParam) == BN_CLICKED) {
@@ -901,6 +1018,37 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 DeleteObject(font);
                 return TRUE;
             }
+            if (draw->CtlID == kDeviceComboControl) {
+                if (static_cast<int>(draw->itemID) < 0) return TRUE;
+
+                const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+                HBRUSH brush = CreateSolidBrush(selected ? RGB(38, 52, 70) : kPanel);
+                FillRect(draw->hDC, &draw->rcItem, brush);
+                DeleteObject(brush);
+
+                wchar_t text[256]{};
+                SendMessageW(draw->hwndItem, CB_GETLBTEXT, draw->itemID,
+                             reinterpret_cast<LPARAM>(text));
+
+                const bool isActive = state &&
+                    draw->itemID < state->devices.size() &&
+                    state->devices[draw->itemID].hasApo;
+
+                SetBkMode(draw->hDC, TRANSPARENT);
+                SetTextColor(draw->hDC, isActive ? kOnline : kText);
+                HFONT font = CreateFontW(-12, 0, 0, 0, isActive ? FW_SEMIBOLD : FW_NORMAL,
+                                         FALSE, FALSE, FALSE,
+                                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                HFONT previous = static_cast<HFONT>(SelectObject(draw->hDC, font));
+                RECT textRect = draw->rcItem;
+                textRect.left += 10;
+                DrawTextW(draw->hDC, text, -1, &textRect,
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                SelectObject(draw->hDC, previous);
+                DeleteObject(font);
+                return TRUE;
+            }
             if (draw->CtlID == kApoControl) {
                 // Verde cuando el APO esta puesto (es el estado deseable),
                 // contorno neutro cuando falta por instalar.
@@ -977,6 +1125,11 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     using namespace audiopt;
+
+    // COM lo inicializa la propia app: antes lo hacia el constructor del
+    // motor de audio, pero en modo APO ese motor no se crea y la enumeracion
+    // de dispositivos (que usa WASAPI) se quedaria sin COM.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     AppState state;
 
