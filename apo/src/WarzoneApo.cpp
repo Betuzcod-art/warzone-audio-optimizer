@@ -64,7 +64,11 @@ void apoLog(const wchar_t* format, ...) {
 // no convertimos formato, solo procesamos).
 const APO_REG_PROPERTIES kRegProperties = {
     CLSID_WarzoneApoMfx,
-    static_cast<APO_FLAG>(APO_FLAG_INPLACE | APO_FLAG_DEFAULT),
+    // Sin SAMPLESPERFRAME_MUST_MATCH: ver la nota en install-apo.ps1. Debe
+    // coincidir con los Flags que el instalador escribe en el registro.
+    static_cast<APO_FLAG>(APO_FLAG_INPLACE |
+                          APO_FLAG_FRAMESPERSECOND_MUST_MATCH |
+                          APO_FLAG_BITSPERSAMPLE_MUST_MATCH),
     L"Warzone Audio Optimizer",
     L"Warzone Audio Optimizer",
     1, 0,          // versión mayor / menor
@@ -262,9 +266,64 @@ STDMETHODIMP WarzoneApoMfx::Initialize(UINT32 /*cbDataSize*/, BYTE* /*pbyData*/)
 HRESULT WarzoneApoMfx::validateFormat(IAudioMediaType* format) const {
     const WAVEFORMATEX* wave = waveFormatOf(format);
     if (!wave) return E_INVALIDARG;
-    if (!isFloat32(wave)) return APOERR_FORMAT_NOT_SUPPORTED;
     if (wave->nChannels < 1) return APOERR_FORMAT_NOT_SUPPORTED;
-    return S_OK;
+
+    // Se acepta float32 y PCM de 16/24/32 bits. Antes solo se aceptaba
+    // float32, y rechazar el formato hacia que Windows tumbase la cadena de
+    // audio del dispositivo entero: el equipo se quedaba sin sonido. Un
+    // efecto de modo debe adaptarse al formato que le den, no imponerlo.
+    if (isFloat32(wave)) return S_OK;
+    if (wave->wBitsPerSample == 16 || wave->wBitsPerSample == 24 ||
+        wave->wBitsPerSample == 32) {
+        return S_OK;
+    }
+    return APOERR_FORMAT_NOT_SUPPORTED;
+}
+
+// Conversiones entre el formato de la conexion y el float que usa la cadena.
+// Sin reservas ni llamadas bloqueantes: se ejecutan en el hilo de audio.
+void WarzoneApoMfx::convertToFloat(const BYTE* source, float* dest, UINT32 frames) const {
+    const size_t samples = static_cast<size_t>(frames) * channelCount_;
+    if (bitsPerSample_ == 16) {
+        const auto* src = reinterpret_cast<const int16_t*>(source);
+        for (size_t i = 0; i < samples; ++i) dest[i] = src[i] / 32768.0f;
+    } else if (bitsPerSample_ == 24) {
+        for (size_t i = 0; i < samples; ++i) {
+            const BYTE* s = source + i * 3;
+            // Sign-extend de 24 a 32 bits mirando el bit alto.
+            const int32_t v = s[0] | (s[1] << 8) | (s[2] << 16) |
+                              ((s[2] & 0x80) ? 0xFF000000 : 0);
+            dest[i] = v / 8388608.0f;
+        }
+    } else {
+        const auto* src = reinterpret_cast<const int32_t*>(source);
+        for (size_t i = 0; i < samples; ++i) dest[i] = src[i] / 2147483648.0f;
+    }
+}
+
+void WarzoneApoMfx::convertFromFloat(const float* source, BYTE* dest, UINT32 frames) const {
+    const size_t samples = static_cast<size_t>(frames) * channelCount_;
+    if (bitsPerSample_ == 16) {
+        auto* out = reinterpret_cast<int16_t*>(dest);
+        for (size_t i = 0; i < samples; ++i) {
+            out[i] = static_cast<int16_t>(std::clamp(source[i], -1.0f, 1.0f) * 32767.0f);
+        }
+    } else if (bitsPerSample_ == 24) {
+        for (size_t i = 0; i < samples; ++i) {
+            const int32_t v = static_cast<int32_t>(
+                std::clamp(source[i], -1.0f, 1.0f) * 8388607.0f);
+            BYTE* d = dest + i * 3;
+            d[0] = static_cast<BYTE>(v & 0xFF);
+            d[1] = static_cast<BYTE>((v >> 8) & 0xFF);
+            d[2] = static_cast<BYTE>((v >> 16) & 0xFF);
+        }
+    } else {
+        auto* out = reinterpret_cast<int32_t*>(dest);
+        for (size_t i = 0; i < samples; ++i) {
+            out[i] = static_cast<int32_t>(
+                std::clamp(source[i], -1.0f, 1.0f) * 2147483647.0f);
+        }
+    }
 }
 
 STDMETHODIMP WarzoneApoMfx::IsInputFormatSupported(
@@ -402,9 +461,17 @@ STDMETHODIMP WarzoneApoMfx::LockForProcess(
     // excepción de C++ escapando por una frontera COM es comportamiento
     // indefinido -- dentro de audiodg.exe puede tumbar el audio de todo el
     // sistema. Un fallo de reserva debe salir como HRESULT, no como throw.
+    formatIsFloat_ = isFloat32(inputWave);
+    bitsPerSample_ = inputWave->wBitsPerSample;
+
     try {
         chain_.prepare(static_cast<double>(sampleRate_), channelCount_);
         chain_.reserve(maxFrameCount_);
+        // Buffer de conversion: solo hace falta si el formato no es float,
+        // pero se reserva siempre para que APOProcess nunca tenga que decidir
+        // si reservar (reservar ahi esta prohibido).
+        conversionBuffer_.assign(
+            static_cast<size_t>(maxFrameCount_) * channelCount_, 0.0f);
     } catch (const std::bad_alloc&) {
         return E_OUTOFMEMORY;
     } catch (...) {
@@ -488,22 +555,38 @@ STDMETHODIMP_(void) WarzoneApoMfx::APOProcess(
 
     switch (input->u32BufferFlags) {
         case BUFFER_VALID: {
-            auto* samples = reinterpret_cast<float*>(input->pBuffer);
-            auto* outSamples = reinterpret_cast<float*>(output->pBuffer);
-            if (!samples || !outSamples) return;
+            auto* inBytes = reinterpret_cast<BYTE*>(input->pBuffer);
+            auto* outBytes = reinterpret_cast<BYTE*>(output->pBuffer);
+            if (!inBytes || !outBytes) return;
 
-            const UINT32 frames = input->u32ValidFrameCount;
+            UINT32 frames = input->u32ValidFrameCount;
+            // Nunca procesar mas de lo reservado: el buffer de conversion se
+            // dimensiono en LockForProcess y aqui no se puede agrandar.
+            const UINT32 capacity = channelCount_ > 0
+                ? static_cast<UINT32>(conversionBuffer_.size() / channelCount_) : 0;
+            if (frames > capacity) frames = capacity;
+            if (frames == 0) return;
 
-            // Declaramos APO_FLAG_INPLACE, así que normalmente entrada y
-            // salida son el mismo buffer. Si el motor decide darnos buffers
-            // distintos, copiamos primero para no perder la señal.
-            if (samples != outSamples) {
-                const size_t bytes =
-                    static_cast<size_t>(frames) * channelCount_ * sizeof(float);
-                memcpy(outSamples, samples, bytes);
+            if (formatIsFloat_) {
+                auto* samples = reinterpret_cast<float*>(inBytes);
+                auto* outSamples = reinterpret_cast<float*>(outBytes);
+
+                // Declaramos APO_FLAG_INPLACE, así que normalmente entrada y
+                // salida son el mismo buffer. Si el motor decide darnos
+                // buffers distintos, copiamos primero para no perder la señal.
+                if (samples != outSamples) {
+                    memcpy(outSamples, samples,
+                           static_cast<size_t>(frames) * channelCount_ * sizeof(float));
+                }
+                chain_.process(outSamples, frames);
+            } else {
+                // PCM: convertir a float, procesar, y devolver al formato
+                // original. Aceptar PCM en vez de rechazarlo es lo que evita
+                // que Windows tumbe la cadena de audio del dispositivo.
+                convertToFloat(inBytes, conversionBuffer_.data(), frames);
+                chain_.process(conversionBuffer_.data(), frames);
+                convertFromFloat(conversionBuffer_.data(), outBytes, frames);
             }
-
-            chain_.process(outSamples, frames);
 
             output->u32ValidFrameCount = frames;
             output->u32BufferFlags = BUFFER_VALID;

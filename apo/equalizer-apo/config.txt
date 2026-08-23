@@ -1,0 +1,56 @@
+# =============================================================================
+# Warzone Audio Optimizer - configuracion para Equalizer APO
+# -----------------------------------------------------------------------------
+# Traduce a filtros estaticos la parte de nuestra cadena DSP que Equalizer APO
+# puede reproducir.
+#
+# QUE SE CONSERVA:
+#   - Corte de retumbo por debajo de 80 Hz
+#   - Realce de la banda de pasos (cuerpo, presencia y detalle)
+#   - Atenuacion del cuerpo grave de motores, helicopteros y explosiones
+#   - Atenuacion del brillo agudo (cajas de botin, metal)
+#
+# QUE NO SE PUEDE CONSERVAR AQUI:
+#   El realce DINAMICO de pasos y la reduccion DINAMICA de vehiculos. Equalizer
+#   APO aplica filtros fijos: no puede subir una banda solo cuando esta floja y
+#   apagarse ante un disparo, ni agachar los graves solo mientras hay un motor.
+#   Eso exige compresion/expansion, que es codigo, no ecualizacion.
+#
+#   La diferencia practica: aqui los pasos suben SIEMPRE, y con ellos sube algo
+#   del ruido que comparte esas frecuencias. Por eso los realces son mas
+#   moderados que en la app -- pasarse convierte la ventaja en fatiga auditiva.
+#
+# COMO AJUSTARLO:
+#   Edita este archivo y guarda: Equalizer APO lo aplica al instante, sin
+#   reiniciar nada. Si algo suena mal, sube o baja el "Gain" del filtro
+#   correspondiente de 1 en 1 dB.
+# =============================================================================
+
+# Margen para que los realces no saturen. Si el volumen general queda corto,
+# sube este valor (hacia 0); si oyes distorsion en pasajes fuertes, bajalo.
+Preamp: -6 dB
+
+# --- Retumbo -----------------------------------------------------------------
+# Quita lo que esta por debajo de la banda util y solo emborrona la mezcla.
+Filter: ON HP Fc 80 Hz
+
+# --- Motores, helicopteros, cuerpo de explosiones ----------------------------
+# Atenuacion ancha centrada en 220 Hz. En la app esto era dinamico (solo
+# actuaba ante energia sostenida); aqui es fijo, asi que se usa una reduccion
+# moderada para no dejar el juego sin cuerpo.
+Filter: ON PK Fc 220 Hz Gain -5 dB Q 0.8
+
+# --- Pasos -------------------------------------------------------------------
+# Cuerpo del paso: la pisada en si.
+Filter: ON PK Fc 2200 Hz Gain 3 dB Q 0.9
+
+# Presencia: donde viven pasos, recargas y roce de ropa/equipo. Es el realce
+# que mas se nota, y tambien el que mas ruido arrastra si se exagera.
+Filter: ON PK Fc 3600 Hz Gain 5 dB Q 1.1
+
+# Detalle: ayuda a separar un paso real del ruido de fondo.
+Filter: ON PK Fc 5000 Hz Gain 2 dB Q 1.0
+
+# --- Brillo: cajas de botin, cristales, metal --------------------------------
+# Esta banda tapa los pasos y cansa el oido en partidas largas.
+Filter: ON HS Fc 8000 Hz Gain -4 dB Q 0.7

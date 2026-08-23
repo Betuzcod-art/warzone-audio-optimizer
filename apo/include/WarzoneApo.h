@@ -37,6 +37,7 @@
 #include <audioengineextensionapo.h>
 #include <atomic>
 #include <thread>
+#include <vector>
 
 #include "ApoGuids.h"
 #include "dsp/WarzoneAudioChain.h"
@@ -127,6 +128,17 @@ private:
     std::thread settingsWatcher_;
     std::atomic<bool> watcherRunning_{false};
     HANDLE watcherWakeup_ = nullptr;
+
+    // Formato real de la conexion. La cadena DSP trabaja en float, pero el
+    // motor no siempre entrega float: rechazar PCM hacia que Windows tumbase
+    // la cadena de audio entera del dispositivo (el equipo se quedaba mudo).
+    // Ahora se acepta y se convierte aqui.
+    bool formatIsFloat_ = true;
+    UINT32 bitsPerSample_ = 32;
+    std::vector<float> conversionBuffer_;
+
+    void convertToFloat(const BYTE* source, float* dest, UINT32 frames) const;
+    void convertFromFloat(const float* source, BYTE* dest, UINT32 frames) const;
 };
 
 } // namespace warzoneapo

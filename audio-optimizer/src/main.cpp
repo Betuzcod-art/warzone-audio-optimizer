@@ -1,6 +1,7 @@
 #include "WasapiLowLatencyEngine.h"
 #include "AppVersion.h"
 #include "ApoStatus.h"
+#include "EqualizerApoConfig.h"
 #include <Windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -217,6 +218,19 @@ bool saveSettings(const AppState& state) {
                                          buffer, path.c_str())) {
             allOk = false;
         }
+    }
+
+    // Si Equalizer APO esta instalado, exportar tambien su configuracion: es
+    // el motor que de verdad procesa sin delay, y la app hace de mando.
+    if (audiopt::isEqualizerApoInstalled()) {
+        audiopt::writeEqualizerApoConfig(audiopt::buildEqualizerApoConfig(
+            state.sliderValues[kSliderFootsteps],
+            state.sliderValues[kSliderVehicles],
+            state.sliderValues[kSliderAir],
+            state.sliderValues[kSliderBandStart],
+            state.sliderValues[kSliderBandEnd],
+            state.sliderValues[kSliderStereoWidth],
+            state.sliderValues[kSliderVolume]));
     }
 
     // Windows cachea los archivos INI, y ese cache se queda pegado al primer

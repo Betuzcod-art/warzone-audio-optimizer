@@ -544,8 +544,13 @@ $EngineKey = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$ApoClsi
 # IID de IAudioProcessingObject: la interfaz que el motor pide primero.
 $IidAudioProcessingObject = '{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}'
 
-# APO_FLAG_INPLACE(1) | SAMPLESPERFRAME(2) | FRAMESPERSECOND(4) | BITSPERSAMPLE(8)
-$ApoFlags = 15
+# APO_FLAG_INPLACE(1) | FRAMESPERSECOND(4) | BITSPERSAMPLE(8) = 13
+#
+# Deliberadamente SIN SAMPLESPERFRAME_MUST_MATCH(2), que exigiria que el
+# numero de canales de entrada y salida coincida exactamente. Equalizer APO
+# -- que si funciona en este equipo -- usa 13, y con 15 el motor descartaba
+# el APO o fallaba la cadena de audio del dispositivo.
+$ApoFlags = 13
 
 try {
     if (-not (Test-Path $EngineKey)) { New-Item -Path $EngineKey -Force | Out-Null }
@@ -640,6 +645,25 @@ try {
 } catch {
     Write-Warn "No se pudo reiniciar automaticamente: $($_.Exception.Message)"
     Write-Warn 'Reinicia Windows para aplicar los cambios.'
+}
+
+# Verificar que AMBOS servicios quedaron arriba.
+#
+# Reiniciar AudioEndpointBuilder con -Force para tambien a Audiosrv (depende
+# de el) y Windows no siempre lo vuelve a arrancar: el equipo se queda sin
+# sonido y con el icono de audio tachado. Paso durante el desarrollo y se
+# confundio con un fallo del APO, cuando el APO estaba bien.
+foreach ($svc in @('AudioEndpointBuilder', 'Audiosrv')) {
+    for ($intento = 0; $intento -lt 3; $intento++) {
+        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+        if ($s -and $s.Status -eq 'Running') { break }
+        Start-Service -Name $svc -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if (-not ($s -and $s.Status -eq 'Running')) {
+        Write-Err "$svc no arranco. Sin el no hay sonido: reinicia Windows."
+    }
 }
 
 # ---------------------------------------------------------------------------

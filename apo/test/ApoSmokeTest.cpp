@@ -246,8 +246,11 @@ int main() {
     checkHr(hr, "float32 estereo aceptado como salida");
     if (negotiated) { negotiated->Release(); negotiated = nullptr; }
 
+    // PCM debe ACEPTARSE, no rechazarse: cuando un efecto de modo rechaza el
+    // formato, Windows tumba la cadena de audio del dispositivo entero y el
+    // equipo se queda sin sonido. La conversion se hace internamente.
     hr = apo->IsInputFormatSupported(nullptr, pcmType, &negotiated);
-    check(FAILED(hr), "PCM16 rechazado (la cadena solo procesa float32)");
+    checkHr(hr, "PCM16 aceptado (se convierte internamente)");
     if (negotiated) { negotiated->Release(); negotiated = nullptr; }
 
     // -----------------------------------------------------------------------
