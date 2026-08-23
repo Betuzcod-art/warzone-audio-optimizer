@@ -237,7 +237,28 @@ try {
     Start-Sleep -Seconds 3
 } catch {
     Write-Warn "No se pudo reiniciar: $($_.Exception.Message)"
-    Write-Warn 'Reinicia Windows para completar la desinstalacion.'
+}
+
+# Comprobar que AMBOS servicios quedaron arriba, y levantarlos si no.
+#
+# Reiniciar AudioEndpointBuilder con -Force para tambien a Audiosrv, que
+# depende de el, y Windows no siempre lo vuelve a arrancar: el resultado es
+# quedarse sin sonido y con el icono de audio tachado. Es justo lo que paso
+# durante el desarrollo, y el script lo daba por bueno porque solo miraba si
+# el reinicio habia lanzado sin excepcion.
+foreach ($svc in @('AudioEndpointBuilder', 'Audiosrv')) {
+    for ($intento = 0; $intento -lt 3; $intento++) {
+        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+        if ($s -and $s.Status -eq 'Running') { break }
+        Start-Service -Name $svc -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($s -and $s.Status -eq 'Running') {
+        Write-Ok "$svc corriendo"
+    } else {
+        Write-Warn "$svc NO esta corriendo -- reinicia Windows para recuperar el audio"
+    }
 }
 
 # El borrado va DESPUES del reinicio: mientras audiodg tenga la DLL cargada,
