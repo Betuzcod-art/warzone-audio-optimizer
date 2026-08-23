@@ -884,16 +884,21 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 if (selection < 0 || selection >= static_cast<int>(state->devices.size())) {
                     return 0;
                 }
-                const audiopt::RenderDevice& target = state->devices[selection];
+                // COPIAS, no referencias: populateDeviceCombo() reconstruye
+                // state->devices mas abajo, y una referencia al elemento
+                // quedaria colgando justo antes de comprobar el resultado.
+                const std::wstring targetGuid = state->devices[selection].guid;
+                const std::wstring targetLabel = describeDevice(state->devices[selection]);
+                const bool targetHadApo = state->devices[selection].hasApo;
 
                 // Elegir el que ya tiene el APO no es un cambio: no molestamos
                 // con UAC para no hacer nada.
-                if (target.hasApo) return 0;
+                if (targetHadApo) return 0;
 
                 const std::wstring question =
                     (state->apo.attached ? L"Mover el procesamiento a:\n\n    "
                                          : L"Instalar el procesamiento en:\n\n    ") +
-                    describeDevice(target) +
+                    targetLabel +
                     L"\n\nSe pedira permiso de administrador.";
                 if (MessageBoxW(window, question.c_str(), L"Cambiar dispositivo",
                                 MB_OKCANCEL | MB_ICONQUESTION) != IDOK) {
@@ -904,7 +909,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 }
 
                 const std::wstring args =
-                    L"-DeviceGuid \"" + target.guid + L"\" -Unattended";
+                    L"-DeviceGuid \"" + targetGuid + L"\" -Unattended";
                 runApoScript(window, L"install-apo.ps1", args);
 
                 refreshApoStatus(window, *state);
@@ -914,7 +919,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 // dispositivo sin slots libres, que el script rechaza a
                 // proposito para no apagar un efecto del fabricante.
                 if (!state->apo.attached ||
-                    _wcsicmp(state->apo.deviceGuid.c_str(), target.guid.c_str()) != 0) {
+                    _wcsicmp(state->apo.deviceGuid.c_str(), targetGuid.c_str()) != 0) {
                     MessageBoxW(window,
                         L"No se pudo mover el procesamiento a ese dispositivo.\n\n"
                         L"Suele pasar cuando el dispositivo no tiene ningun hueco "
