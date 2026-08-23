@@ -43,11 +43,15 @@
 
 namespace warzoneapo {
 
+// Implementa IAudioSystemEffects2, no la version 1: Windows 11 espera al
+// menos la 2 en cualquier APO nuevo, y sin ella puede llegar a instanciar el
+// objeto y descartarlo despues sin dar ningun error -- que es exactamente el
+// comportamiento que se observo aqui. La v2 solo anade GetEffectsList.
 class WarzoneApoMfx
     : public IAudioProcessingObject,
       public IAudioProcessingObjectConfiguration,
       public IAudioProcessingObjectRT,
-      public IAudioSystemEffects {
+      public IAudioSystemEffects2 {
 public:
     WarzoneApoMfx();
     virtual ~WarzoneApoMfx();
@@ -84,6 +88,10 @@ public:
                                     APO_CONNECTION_PROPERTY** ppOutputConnections) override;
     STDMETHODIMP_(UINT32) CalcInputFrames(UINT32 u32OutputFrameCount) override;
     STDMETHODIMP_(UINT32) CalcOutputFrames(UINT32 u32InputFrameCount) override;
+
+    // --- IAudioSystemEffects2 ---
+    STDMETHODIMP GetEffectsList(LPGUID* ppEffectsIds, UINT* pcEffects,
+                                 HANDLE Event) override;
 
 private:
     // Comprueba que el formato sea float32 interleaved, que es lo único que

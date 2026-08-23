@@ -200,6 +200,8 @@ STDMETHODIMP WarzoneApoMfx::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<IAudioProcessingObjectRT*>(this);
     } else if (IsEqualIID(riid, __uuidof(IAudioSystemEffects))) {
         *ppv = static_cast<IAudioSystemEffects*>(this);
+    } else if (IsEqualIID(riid, __uuidof(IAudioSystemEffects2))) {
+        *ppv = static_cast<IAudioSystemEffects2*>(this);
     } else {
         return E_NOINTERFACE;
     }
@@ -530,6 +532,29 @@ STDMETHODIMP_(UINT32) WarzoneApoMfx::CalcInputFrames(UINT32 u32OutputFrameCount)
 
 STDMETHODIMP_(UINT32) WarzoneApoMfx::CalcOutputFrames(UINT32 u32InputFrameCount) {
     return u32InputFrameCount;
+}
+
+// -----------------------------------------------------------------------------
+// IAudioSystemEffects2
+// -----------------------------------------------------------------------------
+STDMETHODIMP WarzoneApoMfx::GetEffectsList(LPGUID* ppEffectsIds, UINT* pcEffects,
+                                             HANDLE /*Event*/) {
+    if (!ppEffectsIds || !pcEffects) return E_POINTER;
+
+    // Windows usa esta lista para mostrar los efectos activos en la interfaz
+    // de sonido. Declaramos uno: la cadena completa se presenta como un solo
+    // efecto, porque para el usuario es una sola cosa que esta o no activa.
+    auto* ids = static_cast<LPGUID>(CoTaskMemAlloc(sizeof(GUID)));
+    if (!ids) {
+        *ppEffectsIds = nullptr;
+        *pcEffects = 0;
+        return E_OUTOFMEMORY;
+    }
+
+    ids[0] = CLSID_WarzoneApoMfx;
+    *ppEffectsIds = ids;
+    *pcEffects = 1;
+    return S_OK;
 }
 
 } // namespace warzoneapo
