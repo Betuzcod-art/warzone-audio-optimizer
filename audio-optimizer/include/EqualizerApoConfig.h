@@ -65,6 +65,10 @@ inline std::string buildEqualizerApoConfig(
     float lowCrossoverHz, float airCrossoverHz, float stereoWidth,
     float outputTrimDb) {
 
+    // stereoWidth se recibe por compatibilidad con la interfaz, pero no se
+    // usa: ver la nota sobre Copy mas abajo.
+    (void)stereoWidth;
+
     // El umbral del compresor (-15..-45 dB) se traduce a cuanta atenuacion
     // fija aplicar: cuanto mas agresivo era el ajuste dinamico, mas se recorta
     // aqui. No es lo mismo, pero conserva la intencion del slider.
@@ -99,18 +103,16 @@ inline std::string buildEqualizerApoConfig(
         "# Brillo: cajas de botin, cristales, metal\r\n"
         "Filter: ON HS Fc %.0f Hz Gain %.1f dB Q 0.7\r\n"
         "\r\n"
-        "# Ancho estereo: acentua la diferencia entre canales, que es lo que\r\n"
-        "# da la sensacion de direccion.\r\n"
+        "# NOTA: el slider de amplitud estereo no se aplica aqui.\r\n"
         "#\r\n"
-        "# Se expresa como mezcla directa entre L y R, no con canales\r\n"
-        "# virtuales M/S: escrito asi ('Copy: M=... S=...' y luego usarlos),\r\n"
-        "# Equalizer APO dejaba el sonido solo en el canal izquierdo.\r\n"
-        "# Es la misma operacion Mid/Side, desarrollada:\r\n"
-        "#   L' = M + w*S  con  M=(L+R)/2, S=(L-R)/2  =>  L' = a*L + b*R\r\n"
-        "#   siendo a=(1+w)/2 y b=(1-w)/2\r\n"
-        // %+.3f pone el signo dentro del propio numero: con "+%.3f" un valor
-        // negativo salia como "+-0.150" y Equalizer APO no lo interpretaba.
-        "Copy: L=%.3f*L%+.3f*R R=%+.3f*L%+.3f*R\r\n",
+        "# El comando Copy de Equalizer APO evalua las asignaciones EN\r\n"
+        "# SECUENCIA, no a la vez: al calcular R ya usa el L modificado en la\r\n"
+        "# misma linea, lo que rompe el balance y deja el sonido cargado a un\r\n"
+        "# canal. Se probo con canales virtuales M/S y con mezcla directa L/R,\r\n"
+        "# y ambas formas desequilibraban el estereo.\r\n"
+        "#\r\n"
+        "# El ensanchado es un extra; los filtros son lo que aporta. Antes que\r\n"
+        "# entregar un estereo roto, se deja fuera.\r\n",
         // Margen anti-saturacion proporcional al realce, no fijo: si se
         // restaran siempre 6 dB, un usuario que ya hubiera bajado el volumen
         // acabaria con el audio inaudible.
@@ -121,11 +123,7 @@ inline std::string buildEqualizerApoConfig(
         presenceGain,
         presenceGain * 0.4f,
         airCrossoverHz * 1.6f,               // el shelf empieza sobre el corte
-        airGainDb,
-        // a y b de la mezcla estereo. Suman 1, asi que un sonido centrado
-        // (L==R) sale con el mismo nivel: solo se acentua lo que difiere.
-        (1.0f + stereoWidth) * 0.5f, (1.0f - stereoWidth) * 0.5f,
-        (1.0f - stereoWidth) * 0.5f, (1.0f + stereoWidth) * 0.5f);
+        airGainDb);
 
     return written > 0 ? std::string(buffer) : std::string();
 }
