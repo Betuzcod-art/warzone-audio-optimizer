@@ -66,11 +66,16 @@ $PkeyStreamEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},5'
 $PkeyModeEffect   = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6'
 $PkeyEndpointEffect = '{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},7'
 
-# Orden de preferencia al buscar hueco: EFX primero (procesa al final, sin
-# estorbar a nadie), luego MFX.
+# Orden de preferencia al buscar hueco: MFX primero, luego SFX.
+#
+# EFX queda FUERA a proposito. Parecia la opcion ideal por ser la ultima de
+# la cadena y la que menos estorba, pero en la practica no procesa: Microsoft
+# documenta que el efecto de endpoint suele existir solo para identificacion,
+# porque a esa altura el audio ya paso a modo kernel. Comprobado aqui: con el
+# APO en EFX, Windows no llegaba a cargarlo nunca; en MFX carga y procesa.
 $SlotPreference = @(
-    @{ Key = $PkeyEndpointEffect; Name = 'EFX (final de la cadena)' },
-    @{ Key = $PkeyModeEffect;     Name = 'MFX (mezcla combinada)' }
+    @{ Key = $PkeyModeEffect;   Name = 'MFX (mezcla combinada)' },
+    @{ Key = $PkeyStreamEffect; Name = 'SFX (por stream)' }
 )
 
 # PKEY_AudioEndpoint_Disable_SysFx. Windows la pone a 1 automaticamente si un
