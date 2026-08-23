@@ -33,6 +33,7 @@
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"WarzoneAudioOptimizerWindow";
+constexpr int kToggleControl = 1001;
 constexpr int kUpdateCheckControl = 1002;
 constexpr UINT_PTR kRefreshTimer = 1;
 constexpr UINT kUpdateResultMessage = WM_APP + 1;
@@ -90,9 +91,14 @@ const SliderSpec kSliders[kSliderCount] = {
     -12.0f,   6.0f,  0.0f,  kFormatDb, false},
 };
 
+// Interruptor de encendido, entre el estado y los sliders: es lo primero
+// que se busca para comparar como suena con y sin procesamiento.
+constexpr int kToggleY = 182;
+constexpr int kToggleHeight = 44;
+
 constexpr int kSliderX = 44;
 constexpr int kSliderWidth = 512;
-constexpr int kSliderFirstY = 252;
+constexpr int kSliderFirstY = 262;
 constexpr int kSliderSpacing = 58;
 constexpr int kSliderTrackHeight = 6;
 constexpr int kSliderThumbWidth = 12;
@@ -105,6 +111,7 @@ constexpr int kButtonsY = kSliderFirstY + kSliderCount * kSliderSpacing + 16;
 constexpr int kWindowHeight = kButtonsY + 32 + 64;
 
 struct AppState {
+    HWND toggleButton = nullptr;
     HWND updateButton = nullptr;
     bool checkingUpdate = false;
     float sliderValues[kSliderCount]{};
@@ -112,6 +119,10 @@ struct AppState {
 
     // Equalizer APO es el motor: la app solo escribe su configuracion.
     bool equalizerApoReady = false;
+
+    // Apagado = se escribe una configuracion vacia, asi que el audio pasa
+    // sin tocar. Sirve para comparar A/B sin desinstalar nada.
+    bool enabled = true;
 };
 
 AppState* getState(HWND window) {
@@ -193,6 +204,10 @@ void loadSettings(AppState& state) {
         }
         state.sliderValues[i] = value;
     }
+
+    // Por defecto encendido: es lo que espera quien abre la app.
+    state.enabled = GetPrivateProfileIntW(kSettingsSection, L"enabled", 1,
+                                           path.c_str()) != 0;
 }
 
 // Escribe los ajustes y, si Equalizer APO esta instalado, su configuracion.
@@ -209,7 +224,20 @@ bool applySettings(const AppState& state) {
     // Windows cachea los archivos INI por proceso; esta llamada lo vuelca.
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
 
+    // El estado del interruptor tambien se guarda: al reabrir la app debe
+    // encontrarse como se dejo.
+    WritePrivateProfileStringW(kSettingsSection, L"enabled",
+                                state.enabled ? L"1" : L"0", path.c_str());
+
     if (!state.equalizerApoReady) return false;
+
+    if (!state.enabled) {
+        // Configuracion vacia: Equalizer APO sigue en la cadena pero no
+        // aplica nada, asi que el audio pasa igual que sin la app.
+        return audiopt::writeEqualizerApoConfig(
+            "# Warzone Audio Optimizer -- procesamiento APAGADO\r\n"
+            "# El audio pasa sin modificar. Vuelve a encenderlo desde la app.\r\n");
+    }
 
     return audiopt::writeEqualizerApoConfig(audiopt::buildEqualizerApoConfig(
         state.sliderValues[kSliderFootsteps],
@@ -359,11 +387,10 @@ void paintWindow(HWND window, HDC dc) {
 
     if (!state) return;
 
-    drawText(dc, ready ? L"LOS CAMBIOS SE APLICAN AL INSTANTE"
-                       : L"LOS SLIDERS NO TENDRAN EFECTO HASTA INSTALARLO",
-             44, 196, 12, ready ? kOnline : kWarning, true);
-    drawText(dc, L"Mueve un slider y escucha: no hace falta reiniciar nada",
-             44, 218, 12, kMuted);
+    drawText(dc, state->enabled
+                 ? L"Mueve un slider y escucha: los cambios entran al instante"
+                 : L"Procesamiento apagado: el audio pasa sin modificar",
+             44, 236, 11, kMuted);
 
     drawSliders(dc, *state);
 }
@@ -496,6 +523,11 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     switch (message) {
         case WM_CREATE:
             state = getState(window);
+            state->toggleButton = CreateWindowExW(
+                0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                kSliderX, kToggleY, kSliderWidth, kToggleHeight, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kToggleControl)),
+                GetModuleHandleW(nullptr), nullptr);
             state->updateButton = CreateWindowExW(
                 0, L"BUTTON", L"BUSCAR ACTUALIZACIONES",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -540,6 +572,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             break;
 
         case WM_COMMAND:
+            if (LOWORD(wParam) == kToggleControl && HIWORD(wParam) == BN_CLICKED) {
+                if (state) {
+                    state->enabled = !state->enabled;
+                    applySettings(*state);
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
+            }
             if (LOWORD(wParam) == kUpdateCheckControl && HIWORD(wParam) == BN_CLICKED) {
                 if (state && !state->checkingUpdate) {
                     state->checkingUpdate = true;
@@ -589,6 +629,33 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         case WM_DRAWITEM: {
             auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+
+            if (draw->CtlID == kToggleControl) {
+                const bool on = state && state->enabled;
+                // Verde solido encendido, gris apagado: el estado tiene que
+                // leerse de un vistazo mientras se compara a oido.
+                HBRUSH fill = CreateSolidBrush(on ? RGB(32, 96, 68) : RGB(44, 52, 64));
+                FillRect(draw->hDC, &draw->rcItem, fill);
+                DeleteObject(fill);
+                HBRUSH border = CreateSolidBrush(on ? kOnline : RGB(70, 80, 96));
+                FrameRect(draw->hDC, &draw->rcItem, border);
+                DeleteObject(border);
+
+                SetBkMode(draw->hDC, TRANSPARENT);
+                SetTextColor(draw->hDC, on ? kOnline : kMuted);
+                HFONT font = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                HFONT previous = static_cast<HFONT>(SelectObject(draw->hDC, font));
+                DrawTextW(draw->hDC,
+                          on ? L"PROCESAMIENTO ENCENDIDO   (clic para apagar)"
+                             : L"PROCESAMIENTO APAGADO   (clic para encender)",
+                          -1, &draw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(draw->hDC, previous);
+                DeleteObject(font);
+                return TRUE;
+            }
+
             if (draw->CtlID != kUpdateCheckControl) break;
             HBRUSH brush = CreateSolidBrush(kPanel);
             FillRect(draw->hDC, &draw->rcItem, brush);
