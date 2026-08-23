@@ -51,6 +51,7 @@ const COLORREF kWarning = RGB(246, 187, 78);
 // -----------------------------------------------------------------------------
 enum SliderId {
     kSliderFootsteps = 0,
+    kSliderGunshots,
     kSliderVehicles,
     kSliderAir,
     kSliderBandStart,
@@ -79,6 +80,8 @@ struct SliderSpec {
 const SliderSpec kSliders[kSliderCount] = {
     {L"REALCE DE PASOS",        L"Sube pasos, recargas y ropa",     L"footstepBoostDb",
       0.0f,  14.0f,  8.0f,  kFormatDb, false},
+    {L"REDUCIR DISPAROS",       L"Baja el cuerpo del arma (700-1500 Hz)", L"gunshotCutDb",
+      0.0f, -12.0f,  -3.0f, kFormatDb, false},
     {L"REDUCIR MOTORES/BOMBAS", L"Agacha vehiculos y explosiones",  L"vehicleThresholdDb",
     -15.0f, -45.0f, -40.0f, kFormatDb, false},
     {L"REDUCIR BRILLO/CAJAS",   L"Baja el tintineo metalico agudo", L"airGainDb",
@@ -241,6 +244,7 @@ bool applySettings(const AppState& state) {
 
     return audiopt::writeEqualizerApoConfig(audiopt::buildEqualizerApoConfig(
         state.sliderValues[kSliderFootsteps],
+        state.sliderValues[kSliderGunshots],
         state.sliderValues[kSliderVehicles],
         state.sliderValues[kSliderAir],
         state.sliderValues[kSliderBandStart],

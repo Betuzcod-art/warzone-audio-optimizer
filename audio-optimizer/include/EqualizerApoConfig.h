@@ -61,9 +61,9 @@ inline bool isEqualizerApoInstalled() {
 // stereoWidth       -> ancho estereo via Mid/Side
 // outputTrimDb      -> preamplificacion
 inline std::string buildEqualizerApoConfig(
-    float footstepBoostDb, float vehicleThresholdDb, float airGainDb,
-    float lowCrossoverHz, float airCrossoverHz, float stereoWidth,
-    float outputTrimDb) {
+    float footstepBoostDb, float gunshotCutDb, float vehicleThresholdDb,
+    float airGainDb, float lowCrossoverHz, float airCrossoverHz,
+    float stereoWidth, float outputTrimDb) {
 
     // stereoWidth se recibe por compatibilidad con la interfaz, pero no se
     // usa: ver la nota sobre Copy mas abajo.
@@ -95,6 +95,12 @@ inline std::string buildEqualizerApoConfig(
         "# Motores, helicopteros, cuerpo de explosiones\r\n"
         "Filter: ON PK Fc %.0f Hz Gain %.1f dB Q 0.8\r\n"
         "\r\n"
+        "# Disparos: el 'punch' del arma vive sobre todo entre 700 y 1500 Hz,\r\n"
+        "# una banda donde los pasos apenas tienen energia. Es lo unico que\r\n"
+        "# permite bajarlos sin llevarse los pasos por delante, ya que en la\r\n"
+        "# zona de 2-5 kHz ambos se solapan y un filtro fijo no los distingue.\r\n"
+        "Filter: ON PK Fc 1100 Hz Gain %.1f dB Q 1.0\r\n"
+        "\r\n"
         "# Pasos: cuerpo, presencia y detalle\r\n"
         "Filter: ON PK Fc 2200 Hz Gain %.1f dB Q 0.9\r\n"
         "Filter: ON PK Fc 3600 Hz Gain %.1f dB Q 1.1\r\n"
@@ -119,6 +125,7 @@ inline std::string buildEqualizerApoConfig(
         outputTrimDb - (presenceGain * 0.5f),
         lowCrossoverHz * 0.31f,              // ~220 Hz cuando el corte esta en 700
         vehicleCutDb,
+        gunshotCutDb,
         presenceGain * 0.6f,
         presenceGain,
         presenceGain * 0.4f,
