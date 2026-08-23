@@ -31,9 +31,15 @@
 
 namespace audiopt {
 
-// Ruta del archivo que escribe la app y lee Equalizer APO.
+// La app escribe DIRECTAMENTE el config.txt de Equalizer APO.
+//
+// El primer intento fue dejar el config.txt con un "Include:" apuntando a un
+// archivo nuestro en ProgramData, para no necesitar permisos. No funciono:
+// Equalizer APO no aplicaba el archivo incluido. Escribir su config.txt
+// directamente si funciona, y el instalador da permiso de escritura a esa
+// carpeta una sola vez para que la app no tenga que elevarse en cada cambio.
 inline std::wstring equalizerApoIncludePath() {
-    return L"C:\\ProgramData\\WarzoneAudioOptimizer\\warzone-eq.txt";
+    return L"C:\\Program Files\\EqualizerAPO\\config\\config.txt";
 }
 
 // Ruta del config.txt de Equalizer APO, si esta instalado.
@@ -93,10 +99,18 @@ inline std::string buildEqualizerApoConfig(
         "# Brillo: cajas de botin, cristales, metal\r\n"
         "Filter: ON HS Fc %.0f Hz Gain %.1f dB Q 0.7\r\n"
         "\r\n"
-        "# Ancho estereo (Mid/Side): acentua la diferencia entre canales, que\r\n"
-        "# es lo que da la sensacion de direccion.\r\n"
-        "Copy: M=0.5*L+0.5*R S=0.5*L-0.5*R\r\n"
-        "Copy: L=M+%.2f*S R=M-%.2f*S\r\n",
+        "# Ancho estereo: acentua la diferencia entre canales, que es lo que\r\n"
+        "# da la sensacion de direccion.\r\n"
+        "#\r\n"
+        "# Se expresa como mezcla directa entre L y R, no con canales\r\n"
+        "# virtuales M/S: escrito asi ('Copy: M=... S=...' y luego usarlos),\r\n"
+        "# Equalizer APO dejaba el sonido solo en el canal izquierdo.\r\n"
+        "# Es la misma operacion Mid/Side, desarrollada:\r\n"
+        "#   L' = M + w*S  con  M=(L+R)/2, S=(L-R)/2  =>  L' = a*L + b*R\r\n"
+        "#   siendo a=(1+w)/2 y b=(1-w)/2\r\n"
+        // %+.3f pone el signo dentro del propio numero: con "+%.3f" un valor
+        // negativo salia como "+-0.150" y Equalizer APO no lo interpretaba.
+        "Copy: L=%.3f*L%+.3f*R R=%+.3f*L%+.3f*R\r\n",
         // Margen anti-saturacion proporcional al realce, no fijo: si se
         // restaran siempre 6 dB, un usuario que ya hubiera bajado el volumen
         // acabaria con el audio inaudible.
@@ -108,15 +122,16 @@ inline std::string buildEqualizerApoConfig(
         presenceGain * 0.4f,
         airCrossoverHz * 1.6f,               // el shelf empieza sobre el corte
         airGainDb,
-        stereoWidth, stereoWidth);
+        // a y b de la mezcla estereo. Suman 1, asi que un sonido centrado
+        // (L==R) sale con el mismo nivel: solo se acentua lo que difiere.
+        (1.0f + stereoWidth) * 0.5f, (1.0f - stereoWidth) * 0.5f,
+        (1.0f - stereoWidth) * 0.5f, (1.0f + stereoWidth) * 0.5f);
 
     return written > 0 ? std::string(buffer) : std::string();
 }
 
 // Escribe el archivo. Devuelve false si no se pudo.
 inline bool writeEqualizerApoConfig(const std::string& content) {
-    CreateDirectoryW(L"C:\\ProgramData\\WarzoneAudioOptimizer", nullptr);
-
     HANDLE file = CreateFileW(equalizerApoIncludePath().c_str(), GENERIC_WRITE,
                               FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
