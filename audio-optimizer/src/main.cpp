@@ -202,30 +202,66 @@ std::wstring legacySettingsFilePath() {
     return std::wstring(appData) + L"\\WarzoneAudioOptimizer\\settings.ini";
 }
 
-void saveSettings(const AppState& state) {
+// Devuelve false si no se pudo escribir. Importa: un guardado que falla en
+// silencio se manifiesta como "los sliders no hacen nada", sin ninguna pista
+// de que el problema son los permisos del archivo.
+bool saveSettings(const AppState& state) {
     const std::wstring path = settingsFilePath(/*createDirectory*/ true);
-    if (path.empty()) return;
+    if (path.empty()) return false;
 
+    bool allOk = true;
     for (int i = 0; i < kSliderCount; ++i) {
         wchar_t buffer[64]{};
         swprintf(buffer, std::size(buffer), L"%.4f", state.sliderValues[i]);
-        WritePrivateProfileStringW(kSettingsSection, kSliders[i].settingsKey,
-                                    buffer, path.c_str());
+        if (!WritePrivateProfileStringW(kSettingsSection, kSliders[i].settingsKey,
+                                         buffer, path.c_str())) {
+            allOk = false;
+        }
     }
+    return allOk;
+}
+
+// Avisa una sola vez por sesion: repetirlo en cada slider seria insufrible.
+void warnIfSettingsUnwritable(HWND window, const AppState& state) {
+    static bool warned = false;
+    if (warned) return;
+    if (saveSettings(state)) return;
+
+    warned = true;
+    MessageBoxW(window,
+        L"No se pudieron guardar los ajustes.\n\n"
+        L"El archivo C:\\ProgramData\\WarzoneAudioOptimizer\\settings.ini "
+        L"pertenece al administrador y esta aplicacion no puede escribirlo, "
+        L"asi que los cambios de los sliders no llegan al APO.\n\n"
+        L"Solucion: vuelve a instalar el modo APO desde el boton de abajo. "
+        L"El instalador corrige los permisos.",
+        L"Warzone Audio Optimizer", MB_OK | MB_ICONWARNING);
+}
+
+// Fecha de ultima modificacion de un archivo; devuelve false si no existe.
+bool fileWriteTime(const std::wstring& path, FILETIME& out) {
+    if (path.empty()) return false;
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return false;
+    out = data.ftLastWriteTime;
+    return true;
 }
 
 void loadSettings(AppState& state) {
     std::wstring path = settingsFilePath(/*createDirectory*/ false);
 
-    // Si todavia no hay ajustes en la ubicacion nueva pero si en la antigua,
-    // se leen de alli: cambiar donde se guardan no debe costarle al usuario
-    // los ajustes que ya habia afinado.
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        const std::wstring legacy = legacySettingsFilePath();
-        if (!legacy.empty() &&
-            GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            path = legacy;
-        }
+    // Al cambiar de ubicacion pueden quedar dos archivos a la vez: el nuevo
+    // (que lee el APO) y el antiguo, que versiones previas de la app seguian
+    // escribiendo. Gana el MAS RECIENTE, no simplemente el nuevo: si no, un
+    // archivo viejo en la ubicacion nueva descartaria en silencio los
+    // ajustes que el usuario acaba de hacer.
+    const std::wstring legacy = legacySettingsFilePath();
+    FILETIME currentTime{}, legacyTime{};
+    const bool hasCurrent = fileWriteTime(path, currentTime);
+    const bool hasLegacy = fileWriteTime(legacy, legacyTime);
+
+    if (hasLegacy && (!hasCurrent || CompareFileTime(&legacyTime, &currentTime) > 0)) {
+        path = legacy;
     }
 
     for (int i = 0; i < kSliderCount; ++i) {
@@ -885,7 +921,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 ReleaseCapture();
                 // Guardamos al soltar (no en cada WM_MOUSEMOVE, que serían
                 // cientos de escrituras a disco por arrastre).
-                saveSettings(*state);
+                warnIfSettingsUnwritable(window, *state);
                 InvalidateRect(window, nullptr, FALSE);
                 return 0;
             }
@@ -1195,6 +1231,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     for (int i = 0; i < kSliderCount; ++i) {
         pushSliderToDsp(state, i);
     }
+
+    // Reescribe los ajustes en la ubicacion que lee el APO. Sin esto, si los
+    // ajustes venian del archivo antiguo, el APO seguiria con los valores por
+    // defecto hasta que el usuario tocara un slider -- y la impresion seria
+    // que la app "no hace nada".
+    saveSettings(state);
 
     // Log de diagnóstico. Se escribe SIEMPRE, incluso en modo APO donde no
     // hay motor local: saber en que modo arranco la app es justo lo primero

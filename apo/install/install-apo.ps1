@@ -426,6 +426,26 @@ if ((Test-Path $legacy) -and -not (Test-Path $target)) {
     if (Test-Path $target) { Write-Ok 'Ajustes existentes migrados' }
 }
 
+# Y darle permiso de escritura al ARCHIVO, no solo a la carpeta.
+#
+# Este script corre elevado, asi que todo lo que crea pertenece a
+# Administradores y deja a los usuarios en solo lectura. La app NO corre
+# elevada: sin esto, guardaria los ajustes sin exito y en silencio -- los
+# sliders pareceria que no hacen nada, que es exactamente el sintoma que
+# costo horas de diagnostico.
+if (Test-Path $target) {
+    try {
+        $fileAcl = Get-Acl $target
+        $fileRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            'BUILTIN\Users', 'Modify', 'Allow')
+        $fileAcl.SetAccessRule($fileRule)
+        Set-Acl -Path $target -AclObject $fileAcl
+        Write-Ok 'El archivo de ajustes es escribible por el usuario'
+    } catch {
+        Write-Warn "No se pudieron ajustar permisos del archivo: $($_.Exception.Message)"
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 4. Instalar y registrar la DLL
 # ---------------------------------------------------------------------------
