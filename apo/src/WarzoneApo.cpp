@@ -76,7 +76,62 @@ bool isFloat32(const WAVEFORMATEX* format) {
 } // namespace
 
 WarzoneApoMfx::WarzoneApoMfx() = default;
-WarzoneApoMfx::~WarzoneApoMfx() = default;
+
+WarzoneApoMfx::~WarzoneApoMfx() {
+    // Si el motor destruye el APO sin llamar a UnlockForProcess, el hilo
+    // vigilante seguiria vivo apuntando a un objeto liberado.
+    stopSettingsWatcher();
+}
+
+// -----------------------------------------------------------------------------
+// Vigilancia del archivo de ajustes
+// -----------------------------------------------------------------------------
+void WarzoneApoMfx::startSettingsWatcher() {
+    if (watcherRunning_.load(std::memory_order_relaxed)) return;
+
+    // Evento manual para poder cortar la espera al instante en vez de tener
+    // que agotar el intervalo de sondeo al cerrar.
+    watcherWakeup_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    watcherRunning_.store(true, std::memory_order_relaxed);
+
+    settingsWatcher_ = std::thread([this]() {
+        const std::wstring path = settingsPath();
+        FILETIME lastWrite{};
+
+        auto readTimestamp = [&](FILETIME& out) -> bool {
+            WIN32_FILE_ATTRIBUTE_DATA data{};
+            if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return false;
+            out = data.ftLastWriteTime;
+            return true;
+        };
+
+        readTimestamp(lastWrite);
+
+        while (watcherRunning_.load(std::memory_order_relaxed)) {
+            // 400ms: lo bastante rápido para que mover un slider se sienta
+            // inmediato, y lo bastante lento para que mirar un archivo no
+            // suponga carga apreciable.
+            if (WaitForSingleObject(watcherWakeup_, 400) == WAIT_OBJECT_0) break;
+
+            FILETIME current{};
+            if (!readTimestamp(current)) continue;
+            if (CompareFileTime(&current, &lastWrite) == 0) continue;
+
+            lastWrite = current;
+            loadUserSettings();
+        }
+    });
+}
+
+void WarzoneApoMfx::stopSettingsWatcher() {
+    if (!watcherRunning_.exchange(false)) return;
+    if (watcherWakeup_) SetEvent(watcherWakeup_);
+    if (settingsWatcher_.joinable()) settingsWatcher_.join();
+    if (watcherWakeup_) {
+        CloseHandle(watcherWakeup_);
+        watcherWakeup_ = nullptr;
+    }
+}
 
 // -----------------------------------------------------------------------------
 // IUnknown
@@ -267,6 +322,7 @@ STDMETHODIMP WarzoneApoMfx::LockForProcess(
     }
 
     loadUserSettings();
+    startSettingsWatcher();
 
     locked_ = true;
     return S_OK;
@@ -274,6 +330,7 @@ STDMETHODIMP WarzoneApoMfx::LockForProcess(
 
 STDMETHODIMP WarzoneApoMfx::UnlockForProcess() {
     if (!locked_) return APOERR_ALREADY_UNLOCKED;
+    stopSettingsWatcher();
     locked_ = false;
     return S_OK;
 }

@@ -1,5 +1,6 @@
 #include "WasapiLowLatencyEngine.h"
 #include "AppVersion.h"
+#include "ApoStatus.h"
 #include <Windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -18,6 +19,7 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"WarzoneAudioOptimizerWindow";
 constexpr int kToggleControl = 1001;
 constexpr int kUpdateCheckControl = 1002;
+constexpr int kApoControl = 1003;
 constexpr UINT_PTR kRefreshTimer = 1;
 constexpr UINT kUpdateResultMessage = WM_APP + 1;
 
@@ -107,14 +109,16 @@ constexpr int kSliderThumbHeight = 20;
 // track dibujado, para que no haya que apuntar al pixel).
 constexpr int kSliderHitPadding = 12;
 
-// Los botones van debajo de la última fila de sliders.
+// Los botones van debajo de la última fila de sliders: activar (54px),
+// modo APO (38px) y buscar actualizaciones (32px), con sus separaciones.
 constexpr int kButtonsY = kSliderFirstY + kSliderCount * kSliderSpacing + 12;
-constexpr int kWindowHeight = kButtonsY + 66 + 32 + 56;
+constexpr int kWindowHeight = kButtonsY + 108 + 32 + 58;
 
 struct AppState {
     std::unique_ptr<audiopt::WasapiLowLatencyEngine> engine;
     HWND toggleButton = nullptr;
     HWND updateButton = nullptr;
+    HWND apoButton = nullptr;
     bool active = false;
     ULONGLONG activatedAtMs = 0;
     bool baselineCaptured = false;
@@ -123,7 +127,14 @@ struct AppState {
     bool checkingUpdate = false;
     float sliderValues[kSliderCount]{};
     int draggingSlider = -1;
+
+    // Estado del APO. Cuando esta asociado a un dispositivo, la app NO
+    // procesa audio: seria procesarlo dos veces. Pasa a ser su mando.
+    audiopt::ApoStatus apo;
 };
+
+// Con el APO puesto, el motor local sobra: la app es solo el panel de control.
+bool isApoMode(const AppState& state) { return state.apo.attached; }
 
 // Y del track de un slider dado.
 int sliderTrackY(int index) {
@@ -290,6 +301,11 @@ void fillRoundedBar(HDC dc, int left, int top, int right, int bottom, COLORREF c
 // seguros de llamar desde el hilo de UI mientras el audio corre (guardan el
 // valor en un atómico que el hilo de audio aplica en el siguiente bloque).
 void pushSliderToDsp(AppState& state, int index) {
+    // En modo APO el procesamiento no vive aqui: el valor viaja por el
+    // archivo de ajustes, que el APO relee en caliente. Escribir tambien en
+    // la cadena local seria inofensivo (no esta procesando), pero dejarlo
+    // explicito evita confusion al leer el codigo.
+    if (isApoMode(state)) return;
     if (!state.engine) return;
     auto& chain = state.engine->dspChain();
     const float value = state.sliderValues[index];
@@ -303,6 +319,75 @@ void pushSliderToDsp(AppState& state, int index) {
         case kSliderVolume:    chain.setOutputTrimDb(value); break;
         default: break;
     }
+}
+
+// -----------------------------------------------------------------------------
+// Lanzar los scripts del APO. Necesitan permisos de administrador (tocan el
+// registro del motor de audio), asi que se lanzan con "runas": Windows pide la
+// confirmacion de UAC. La app en si nunca corre elevada -- no lo necesita para
+// nada mas, y pedirlo de mas seria peor.
+// -----------------------------------------------------------------------------
+std::wstring findApoScript(const wchar_t* scriptName) {
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(std::size(exePath)));
+    std::wstring dir(exePath);
+    const size_t slash = dir.find_last_of(L'\\');
+    if (slash != std::wstring::npos) dir.resize(slash);
+
+    // De la instalacion normal a la carpeta de desarrollo (build-gui/..).
+    const std::wstring candidates[] = {
+        dir + L"\\apo\\install\\" + scriptName,
+        dir + L"\\" + scriptName,
+        dir + L"\\..\\..\\apo\\install\\" + scriptName,
+        dir + L"\\..\\apo\\install\\" + scriptName,
+    };
+    for (const auto& candidate : candidates) {
+        if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return candidate;
+        }
+    }
+    return L"";
+}
+
+bool runApoScript(HWND window, const wchar_t* scriptName) {
+    const std::wstring script = findApoScript(scriptName);
+    if (script.empty()) {
+        MessageBoxW(window,
+                    L"No se encontro el script del APO.\n\n"
+                    L"Deberia estar en la carpeta apo\\install junto a la aplicacion.",
+                    L"Warzone Audio Optimizer", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    const std::wstring params =
+        L"-ExecutionPolicy Bypass -NoProfile -File \"" + script + L"\"";
+
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.hwnd = window;
+    info.lpVerb = L"runas";          // eleva: el script toca el registro
+    info.lpFile = L"powershell.exe";
+    info.lpParameters = params.c_str();
+    info.nShow = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExW(&info)) {
+        // 1223 = el usuario cancelo el dialogo de UAC. No es un error que
+        // merezca un mensaje de alarma.
+        if (GetLastError() != ERROR_CANCELLED) {
+            MessageBoxW(window, L"No se pudo lanzar el script del APO.",
+                        L"Warzone Audio Optimizer", MB_OK | MB_ICONERROR);
+        }
+        return false;
+    }
+
+    if (info.hProcess) {
+        // Esperamos a que termine para poder releer el estado con el
+        // resultado ya aplicado.
+        WaitForSingleObject(info.hProcess, INFINITE);
+        CloseHandle(info.hProcess);
+    }
+    return true;
 }
 
 void drawSliders(HDC dc, const AppState& state) {
@@ -471,9 +556,44 @@ UpdateCheckResult checkForUpdates() {
 }
 
 void updateToggleButton(AppState& state) {
-    SetWindowTextW(state.toggleButton,
-                   state.active ? L"DETENER PROCESAMIENTO" : L"ACTIVAR PROCESAMIENTO");
+    if (isApoMode(state)) {
+        // Con el APO puesto no hay nada que activar: el audio ya pasa por la
+        // cadena dentro de Windows, incluso con la app cerrada.
+        SetWindowTextW(state.toggleButton, L"PROCESANDO EN EL MOTOR DE WINDOWS");
+        EnableWindow(state.toggleButton, FALSE);
+    } else {
+        EnableWindow(state.toggleButton, TRUE);
+        SetWindowTextW(state.toggleButton,
+                       state.active ? L"DETENER PROCESAMIENTO" : L"ACTIVAR PROCESAMIENTO");
+    }
     InvalidateRect(state.toggleButton, nullptr, TRUE);
+}
+
+void updateApoButton(AppState& state) {
+    if (!state.apoButton) return;
+    SetWindowTextW(state.apoButton,
+                   state.apo.attached ? L"DESINSTALAR MODO APO (SIN DELAY)"
+                                      : L"INSTALAR MODO APO (SIN DELAY)");
+    InvalidateRect(state.apoButton, nullptr, TRUE);
+}
+
+// Relee el estado del APO y adapta la UI. Se llama al arrancar y despues de
+// instalar/desinstalar.
+void refreshApoStatus(HWND window, AppState& state) {
+    const bool wasApo = state.apo.attached;
+    state.apo = audiopt::queryApoStatus();
+
+    // Si el APO acaba de aparecer y el motor local estaba procesando, hay que
+    // pararlo: dos copias de la misma cadena sobre el mismo audio suena
+    // sobreprocesado y devuelve el delay que el APO viene a quitar.
+    if (state.apo.attached && !wasApo && state.active) {
+        if (state.engine) state.engine->stop();
+        state.active = false;
+    }
+
+    updateToggleButton(state);
+    updateApoButton(state);
+    InvalidateRect(window, nullptr, FALSE);
 }
 
 void showInitializationError(HWND window, const std::wstring& error) {
@@ -483,6 +603,9 @@ void showInitializationError(HWND window, const std::wstring& error) {
 void toggleEngine(HWND window) {
     AppState* state = getState(window);
     if (!state || !state->engine) return;
+    // Salvaguarda: con el APO activo este boton esta deshabilitado, pero un
+    // atajo de teclado podria llegar igual hasta aqui.
+    if (isApoMode(*state)) return;
 
     if (state->active) {
         state->engine->stop();
@@ -523,19 +646,52 @@ void paintWindow(HWND window, HDC dc) {
     FillRect(dc, &statusPanel, panel);
     DeleteObject(panel);
 
-    const COLORREF statusColor = state && state->active ? kOnline : kMuted;
+    // El panel de estado dice tres cosas distintas segun el modo, porque son
+    // situaciones que el usuario necesita distinguir de un vistazo.
+    const bool apoMode = state && isApoMode(*state);
+    const bool processing = apoMode || (state && state->active);
+    const COLORREF statusColor = processing ? kOnline : kMuted;
+
     HBRUSH statusBrush = CreateSolidBrush(statusColor);
     RECT statusDot{56, 124, 68, 136};
     FillRect(dc, &statusDot, statusBrush);
     DeleteObject(statusBrush);
-    drawText(dc, state && state->active ? L"PROCESAMIENTO ACTIVO" : L"PROCESAMIENTO DETENIDO",
-             82, 116, 16, statusColor, true);
-    drawText(dc, state && state->active
-                 ? L"El audio del sistema esta pasando por la cadena DSP"
-                 : L"El audio del sistema se mantiene sin modificar",
-             82, 142, 12, kMuted);
 
-    if (!state || !state->engine) return;
+    const wchar_t* headline;
+    std::wstring detail;
+    if (apoMode) {
+        headline = L"MODO APO ACTIVO  ·  SIN DELAY";
+        detail = L"Procesando dentro de Windows en " + state->apo.deviceName +
+                 L"  (" + state->apo.slotName + L")";
+    } else if (state && state->active) {
+        headline = L"PROCESAMIENTO ACTIVO";
+        detail = L"Pasando por la cadena DSP via cable virtual (con algo de delay)";
+    } else {
+        headline = L"PROCESAMIENTO DETENIDO";
+        detail = L"El audio del sistema se mantiene sin modificar";
+    }
+    drawText(dc, headline, 82, 116, 16, statusColor, true);
+    drawText(dc, detail.c_str(), 82, 142, 12, kMuted);
+
+    if (!state) return;
+
+    if (apoMode) {
+        // Las metricas del motor local (insured frames, resyncs, modo de
+        // render) miden el camino por cable virtual, que aqui no se usa:
+        // mostrarlas seria enganoso. Se sustituyen por lo que si aplica.
+        drawMetric(dc, L"MODO", L"APO", 40, 200);
+        drawMetric(dc, L"LATENCIA AÑADIDA", L"~0 ms", 160, 200);
+        drawMetric(dc, L"CABLE VIRTUAL", L"NO USADO", 340, 200);
+
+        drawText(dc, L"AJUSTES EN VIVO", 44, 260, 12, kOnline, true);
+        drawText(dc,
+                 L"Los sliders se aplican solos en 1 segundo, sin reiniciar nada",
+                 44, 282, 12, kMuted);
+        drawSliders(dc, *state);
+        return;
+    }
+
+    if (!state->engine) return;
 
     std::wstring sampleRate = std::to_wstring(state->engine->sampleRate()) + L" Hz";
     std::wstring channels = std::to_wstring(state->engine->numChannels());
@@ -597,12 +753,19 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 36, kButtonsY, 548, 54, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kToggleControl)),
                 GetModuleHandleW(nullptr), nullptr);
+            state->apoButton = CreateWindowExW(
+                0, L"BUTTON", L"INSTALAR MODO APO (SIN DELAY)",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                36, kButtonsY + 62, 548, 38, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kApoControl)),
+                GetModuleHandleW(nullptr), nullptr);
             state->updateButton = CreateWindowExW(
                 0, L"BUTTON", L"BUSCAR ACTUALIZACIONES",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                36, kButtonsY + 66, 548, 32, window,
+                36, kButtonsY + 108, 548, 32, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUpdateCheckControl)),
                 GetModuleHandleW(nullptr), nullptr);
+            refreshApoStatus(window, *state);
             SetTimer(window, kRefreshTimer, 1000, nullptr);
             return 0;
 
@@ -644,6 +807,28 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case WM_COMMAND:
             if (LOWORD(wParam) == kToggleControl && HIWORD(wParam) == BN_CLICKED) {
                 toggleEngine(window);
+                return 0;
+            }
+            if (LOWORD(wParam) == kApoControl && HIWORD(wParam) == BN_CLICKED) {
+                if (!state) return 0;
+                if (state->apo.attached) {
+                    runApoScript(window, L"uninstall-apo.ps1");
+                } else {
+                    const int choice = MessageBoxW(window,
+                        L"El modo APO procesa el audio dentro de Windows, sin cable "
+                        L"virtual: es lo que elimina el delay.\n\n"
+                        L"Para instalarlo hay que desactivar la verificacion de firma "
+                        L"de APOs de Windows (DisableProtectedAudioDG). No se toca "
+                        L"Secure Boot, pero es un cambio real en una proteccion del "
+                        L"sistema, y no se puede garantizar como reacciona un "
+                        L"anti-cheat de kernel.\n\n"
+                        L"Se abrira una ventana que pedira permisos de administrador.\n\n"
+                        L"Continuar?",
+                        L"Instalar modo APO", MB_YESNO | MB_ICONWARNING);
+                    if (choice != IDYES) return 0;
+                    runApoScript(window, L"install-apo.ps1");
+                }
+                refreshApoStatus(window, *state);
                 return 0;
             }
             if (LOWORD(wParam) == kUpdateCheckControl && HIWORD(wParam) == BN_CLICKED) {
@@ -716,20 +901,48 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 DeleteObject(font);
                 return TRUE;
             }
+            if (draw->CtlID == kApoControl) {
+                // Verde cuando el APO esta puesto (es el estado deseable),
+                // contorno neutro cuando falta por instalar.
+                const bool installed = state && state->apo.attached;
+                HBRUSH brush = CreateSolidBrush(installed ? RGB(30, 62, 48) : kPanel);
+                FillRect(draw->hDC, &draw->rcItem, brush);
+                DeleteObject(brush);
+                HBRUSH border = CreateSolidBrush(installed ? kOnline : RGB(58, 68, 84));
+                FrameRect(draw->hDC, &draw->rcItem, border);
+                DeleteObject(border);
+                SetBkMode(draw->hDC, TRANSPARENT);
+                SetTextColor(draw->hDC, installed ? kOnline : kText);
+                HFONT font = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                HFONT previous = static_cast<HFONT>(SelectObject(draw->hDC, font));
+                wchar_t buttonText[96]{};
+                GetWindowTextW(draw->hwndItem, buttonText, static_cast<int>(std::size(buttonText)));
+                DrawTextW(draw->hDC, buttonText, -1, &draw->rcItem,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(draw->hDC, previous);
+                DeleteObject(font);
+                return TRUE;
+            }
             if (draw->CtlID != kToggleControl) break;
+            const bool apoActive = state && isApoMode(*state);
             const bool active = state && state->active;
-            const COLORREF fillColor = active ? RGB(190, 75, 82) : kAccent;
+            const COLORREF fillColor = apoActive ? RGB(38, 46, 58)
+                                                 : (active ? RGB(190, 75, 82) : kAccent);
             HBRUSH brush = CreateSolidBrush(fillColor);
             FillRect(draw->hDC, &draw->rcItem, brush);
             DeleteObject(brush);
             SetBkMode(draw->hDC, TRANSPARENT);
-            SetTextColor(draw->hDC, RGB(255, 255, 255));
+            SetTextColor(draw->hDC, apoActive ? kMuted : RGB(255, 255, 255));
             HFONT font = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             HFONT previous = static_cast<HFONT>(SelectObject(draw->hDC, font));
-            DrawTextW(draw->hDC, active ? L"DETENER PROCESAMIENTO" : L"ACTIVAR PROCESAMIENTO",
-                      -1, &draw->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            wchar_t toggleText[64]{};
+            GetWindowTextW(draw->hwndItem, toggleText, static_cast<int>(std::size(toggleText)));
+            DrawTextW(draw->hDC, toggleText, -1, &draw->rcItem,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(draw->hDC, previous);
             DeleteObject(font);
             return TRUE;
@@ -766,22 +979,37 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     using namespace audiopt;
 
     AppState state;
-    state.engine = std::make_unique<WasapiLowLatencyEngine>();
 
-    EngineConfig config;
-    config.bufferFrames = 64;
-    config.sampleRate = 44100;
-    config.numChannels = 2;
-    config.useLoopbackCapture = true;
-    config.captureDeviceName = L"CABLE Input";
-    config.renderDeviceName = L"Altavoces (Realtek(R) Audio)";
+    // El estado del APO se consulta ANTES de tocar el motor local: si el APO
+    // esta puesto, la app es solo su panel de control y no necesita ni
+    // VB-CABLE ni un motor WASAPI propio. Fallar aqui por un cable virtual
+    // que ya no hace falta seria absurdo.
+    state.apo = queryApoStatus();
 
     std::wstring error;
-    if (!state.engine->initialize(config, error)) {
-        showInitializationError(nullptr, error);
-        return 1;
+    bool engineReady = false;
+
+    if (!state.apo.attached) {
+        // Solo se monta el motor local cuando hace falta. Con el APO puesto,
+        // inicializarlo abriria dispositivos de audio para nada -- y si
+        // VB-CABLE ya no estuviera, fallaria sin motivo.
+        state.engine = std::make_unique<WasapiLowLatencyEngine>();
+
+        EngineConfig config;
+        config.bufferFrames = 64;
+        config.sampleRate = 44100;
+        config.numChannels = 2;
+        config.useLoopbackCapture = true;
+        config.captureDeviceName = L"CABLE Input";
+        config.renderDeviceName = L"Altavoces (Realtek(R) Audio)";
+
+        engineReady = state.engine->initialize(config, error);
+        if (!engineReady) {
+            showInitializationError(nullptr, error);
+            return 1;
+        }
+        state.engine->dspChain().setBypass(false);
     }
-    state.engine->dspChain().setBypass(false);
 
     // Restaura los ajustes guardados (o los valores por defecto si es la
     // primera vez) y empújalos a la cadena para que UI y DSP digan
@@ -791,8 +1019,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         pushSliderToDsp(state, i);
     }
 
-    // Log de diagnóstico: qué modo de render quedó activo, sample rate y
-    // canales reales. Para no depender de leer letra chica en pantalla.
+    // Log de diagnóstico. Se escribe SIEMPRE, incluso en modo APO donde no
+    // hay motor local: saber en que modo arranco la app es justo lo primero
+    // que hace falta cuando algo no suena como se espera.
     {
         wchar_t tempPath[MAX_PATH]{};
         GetTempPathW(static_cast<DWORD>(std::size(tempPath)), tempPath);
@@ -800,15 +1029,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         HANDLE logFile = CreateFileW(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (logFile != INVALID_HANDLE_VALUE) {
-            const std::wstring line = std::wstring(L"version=") + kAppVersion +
-                L" render=" + (state.engine->renderModeExclusive() ? L"EXCLUSIVE" : L"SHARED") +
-                L" format=" + (state.engine->renderFormatIsFloat() ? L"float32" :
-                    (L"pcm" + std::to_wstring(state.engine->renderContainerBits()) + L"bit")) +
-                L" renderBuf=" + std::to_wstring(state.engine->renderBufferFrames()) +
-                L" captureBuf=" + std::to_wstring(state.engine->captureBufferFrames()) +
-                L" sampleRate=" + std::to_wstring(state.engine->sampleRate()) +
-                L" channels=" + std::to_wstring(state.engine->numChannels()) + L"\r\n" +
-                L"shared: " + state.engine->sharedModeDiagnostics() + L"\r\n";
+            std::wstring line = std::wstring(L"version=") + kAppVersion +
+                L" modo=" + (state.apo.attached ? L"APO" : L"CABLE-VIRTUAL") +
+                L" apoDllRegistrada=" + (state.apo.dllRegistered ? L"si" : L"no") + L"\r\n";
+            if (state.apo.attached) {
+                line += L"apo: dispositivo=\"" + state.apo.deviceName +
+                        L"\" slot=" + state.apo.slotName + L"\r\n";
+            }
+            if (state.engine) {
+                line += std::wstring(L"engine: render=") +
+                    (state.engine->renderModeExclusive() ? L"EXCLUSIVE" : L"SHARED") +
+                    L" format=" + (state.engine->renderFormatIsFloat() ? L"float32" :
+                        (L"pcm" + std::to_wstring(state.engine->renderContainerBits()) + L"bit")) +
+                    L" renderBuf=" + std::to_wstring(state.engine->renderBufferFrames()) +
+                    L" captureBuf=" + std::to_wstring(state.engine->captureBufferFrames()) +
+                    L" sampleRate=" + std::to_wstring(state.engine->sampleRate()) +
+                    L" channels=" + std::to_wstring(state.engine->numChannels()) + L"\r\n" +
+                    L"shared: " + state.engine->sharedModeDiagnostics() + L"\r\n";
+            }
             std::string narrow;
             narrow.reserve(line.size());
             for (wchar_t ch : line) narrow.push_back(static_cast<char>(ch));

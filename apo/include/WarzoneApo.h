@@ -36,6 +36,7 @@
 #include <audioenginebaseapo.h>
 #include <audioengineextensionapo.h>
 #include <atomic>
+#include <thread>
 
 #include "ApoGuids.h"
 #include "dsp/WarzoneAudioChain.h"
@@ -96,6 +97,17 @@ private:
     void loadUserSettings();
     void loadUserSettingsImpl();
 
+    // Hilo que vigila el archivo de ajustes para aplicar los cambios en
+    // vivo. Existe porque el motor de audio solo reinicializa el APO al
+    // cambiar de dispositivo o formato: sin esto, mover un slider en la app
+    // no se notaría hasta reiniciar el audio, y la app dejaria de sentirse
+    // como un panel de control.
+    //
+    // No toca el camino de tiempo real: solo escribe en los atómicos que la
+    // cadena ya consulta al inicio de cada bloque.
+    void startSettingsWatcher();
+    void stopSettingsWatcher();
+
     std::atomic<ULONG> refCount_{1};
     audiopt::WarzoneAudioChain chain_;
 
@@ -103,6 +115,10 @@ private:
     UINT32 channelCount_ = 0;
     UINT32 sampleRate_ = 0;
     UINT32 maxFrameCount_ = 0;
+
+    std::thread settingsWatcher_;
+    std::atomic<bool> watcherRunning_{false};
+    HANDLE watcherWakeup_ = nullptr;
 };
 
 } // namespace warzoneapo
