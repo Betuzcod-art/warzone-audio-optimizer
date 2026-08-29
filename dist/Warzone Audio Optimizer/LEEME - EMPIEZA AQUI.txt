@@ -90,6 +90,13 @@ BOTON ON/OFF
 
 SI ALGO SALE MAL
 ----------------
+Error "no Qt platform plugin could be initialized":
+  La instalacion no habia terminado de copiar archivos.
+  Solucion: reinicia Windows, abre "Configurator" desde el
+  menu inicio y marca ahi tus audifonos. Si Configurator
+  tampoco abre, ejecuta BORRAR TODO Y EMPEZAR DE CERO.cmd,
+  reinicia, y vuelve a instalar.
+
 No oigo ningun cambio al mover los sliders:
   Casi siempre es el paso 3: no marcaste tus audifonos.
   Solucion: menu inicio -> "Configurator" (viene con

@@ -78,3 +78,37 @@ audio varias veces durante el desarrollo.
 
 Hay que **reiniciar antes de reinstalar**: el APO no se descarga del motor
 de audio hasta entonces, y una instalacion nueva encima queda a medias.
+
+## El error de Qt, y por que ocurria
+
+Sintoma en el equipo de un usuario:
+
+> This application failed to start because no Qt platform plugin could be
+> initialized.
+
+`start /wait` no espera de verdad a un instalador NSIS: el proceso lanzado
+puede desprenderse y retornar mientras la instalacion sigue copiando
+archivos. El script daba por terminada la instalacion y lanzaba
+`DeviceSelector.exe` en ese hueco, cuando `qt\platforms\qwindows.dll`
+todavia no existia.
+
+Contribuia la comprobacion: se miraba `EqualizerAPO.dll`, que aparece
+pronto, en vez de un archivo tardio.
+
+Arreglo: se espera al archivo concreto que hace falta
+(`qt\platforms\qwindows.dll`), no al proceso, con un limite de 90 s. Si se
+agota, se dice que ejecuten el instalador a mano en vez de seguir sobre
+una instalacion incompleta.
+
+Ademas:
+- Una instalacion a medias (DLL si, Qt no) se detecta y se manda a limpiar
+  en vez de intentar arreglarla encima.
+- `DeviceSelector.exe` se lanza con `/D` fijando el directorio de trabajo:
+  Qt busca sus plugins en rutas relativas y heredar el directorio de donde
+  se descomprimio el ZIP puede impedir que los encuentre.
+- Si aun asi no abre, se explica como hacerlo desde el menu inicio en vez
+  de dejar al usuario con un error crudo.
+
+Es el mismo fallo que ya aparecio en el desinstalador, donde se resolvio
+con el parametro `_?=` de NSIS. Conviene desconfiar de `start /wait` con
+cualquier instalador NSIS.

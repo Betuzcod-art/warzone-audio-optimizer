@@ -34,12 +34,22 @@ rem ===================================================================
 echo [1/4] Motor de audio...
 echo.
 
-if exist "%EAPO_DIR%\EqualizerAPO.dll" (
-    rem  Ya esta instalado: NO se reinstala. Reinstalar encima podria
-    rem  borrar los dispositivos que el usuario ya tenga seleccionados
-    rem  y dejarlo sin sonido procesado sin saber por que.
+rem  Se comprueba el plugin de Qt, no solo el DLL principal: el DLL
+rem  aparece pronto durante la instalacion y los archivos de interfaz
+rem  bastante despues. Comprobar solo el DLL daba por terminada una
+rem  instalacion a medias.
+if exist "%EAPO_DIR%\qt\platforms\qwindows.dll" (
     echo       Equalizer APO ya estaba instalado. Se conserva tal cual.
     goto motor_listo
+)
+
+if exist "%EAPO_DIR%\EqualizerAPO.dll" (
+    echo       [AVISO] Hay una instalacion incompleta de Equalizer APO.
+    echo       Ejecuta "BORRAR TODO Y EMPEZAR DE CERO.cmd", reinicia
+    echo       Windows y vuelve a ejecutar este instalador.
+    echo.
+    pause
+    exit /b 1
 )
 
 if not exist "%EAPO_SETUP%" (
@@ -53,21 +63,38 @@ if not exist "%EAPO_SETUP%" (
 
 echo       Instalando Equalizer APO. Tarda un momento...
 start /wait "" "%EAPO_SETUP%" /S
-if not exist "%EAPO_DIR%\EqualizerAPO.dll" (
-    echo       [ERROR] La instalacion no se completo.
-    echo       Ejecuta EqualizerAPO-x64-1.4.2.exe a mano y sigue sus pasos.
-    echo.
-    pause
-    exit /b 1
-)
+
+rem  start /wait no es fiable con NSIS: el proceso lanzado puede
+rem  desprenderse y retornar mientras la instalacion sigue copiando
+rem  archivos. Lanzar el selector de dispositivos en ese hueco es lo que
+rem  producia el error "no Qt platform plugin could be initialized".
+rem  Se espera al archivo que hace falta, no al proceso.
+echo       Terminando de copiar archivos...
+set /a ESPERA=0
+:esperar_qt
+if exist "%EAPO_DIR%\qt\platforms\qwindows.dll" goto motor_ok
+timeout /t 1 /nobreak >nul
+set /a ESPERA+=1
+if %ESPERA% LSS 90 goto esperar_qt
+
+echo.
+echo       [ERROR] La instalacion no termino en 90 segundos.
+echo.
+echo       Ejecuta EqualizerAPO-x64-1.4.2.exe a mano, completa sus
+echo       pasos (marcando tus audifonos), reinicia Windows y vuelve
+echo       a ejecutar este instalador.
+echo.
+pause
+exit /b 1
+
+:motor_ok
 set "NEEDS_REBOOT=1"
 echo       [OK] Motor instalado.
 
 rem --- Seleccion de dispositivo: EL PASO QUE MAS FALLA ------------------
 rem  La instalacion silenciosa se salta el dialogo de dispositivos. Sin
 rem  un dispositivo marcado todo queda instalado y no se oye ningun
-rem  cambio, que es el fallo mas comun y el mas confuso. Se lanza aqui
-rem  el selector por separado, con la explicacion delante.
+rem  cambio, que es el fallo mas comun y el mas confuso.
 echo.
 echo ==========================================================
 echo   ATENCION - EL PASO MAS IMPORTANTE
@@ -84,11 +111,17 @@ echo Consejo: si no sabes cual es, mira cual aparece como
 echo predeterminado en el icono de volumen de Windows.
 echo.
 pause
-if exist "%EAPO_DIR%\DeviceSelector.exe" (
-    start /wait "" "%EAPO_DIR%\DeviceSelector.exe"
-) else (
-    echo       [AVISO] No se encontro el selector de dispositivos.
-    echo       Abrelo despues desde el menu inicio: "Configurator".
+
+rem  /D fija el directorio de trabajo. Qt busca sus plugins en rutas
+rem  relativas, y heredar el directorio desde donde se descomprimio el
+rem  ZIP puede impedir que los encuentre.
+start /wait "" /D "%EAPO_DIR%" "%EAPO_DIR%\DeviceSelector.exe"
+if errorlevel 1 (
+    echo.
+    echo       [AVISO] El selector de dispositivos no se pudo abrir.
+    echo       No pasa nada: reinicia Windows, abre "Configurator"
+    echo       desde el menu inicio y marca ahi tus audifonos.
+    echo.
     pause
 )
 
