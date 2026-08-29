@@ -1,0 +1,110 @@
+===========================================================
+  WARZONE AUDIO OPTIMIZER
+  Pasos mas claros, menos ruido de fondo. Sin delay.
+===========================================================
+
+QUE ES
+------
+Un panel de control para el audio de Warzone. Realza la banda
+donde viven los pasos y agacha motores, explosiones y el
+cuerpo de los disparos.
+
+No mete delay: el procesamiento ocurre dentro del motor de
+audio de Windows, no en una app intermedia.
+
+
+ANTES DE INSTALAR: LEE ESTO
+---------------------------
+Esta app NO procesa el audio por si sola. Es el mando; el
+motor es un programa gratuito llamado Equalizer APO. Hay que
+instalar ese primero.
+
+  1. Descarga Equalizer APO (gratis, codigo abierto):
+     https://sourceforge.net/projects/equalizerapo/
+
+  2. Instala la version de 64 bits.
+
+  3. MUY IMPORTANTE: durante la instalacion aparece una lista
+     de dispositivos de audio. MARCA LA CASILLA DE TUS
+     AUDIFONOS. Si no marcas ninguno, no oiras ningun cambio
+     y pensaras que la app no funciona.
+
+  4. Reinicia Windows. Este paso no es opcional.
+
+
+INSTALAR
+--------
+  5. Clic derecho en INSTALAR.cmd -> Ejecutar como
+     administrador.
+
+  6. Abre "Warzone Audio Optimizer" desde el escritorio.
+
+Los cambios se oyen al instante al mover un slider. No hace
+falta reiniciar nada ni cerrar el juego.
+
+
+LOS CONTROLES
+-------------
+REALCE DE PASOS
+  Sube pasos, recargas y roce de ropa. Es el control
+  principal. Empieza en 8 dB y sube de 1 en 1 hasta que te
+  moleste; entonces baja uno.
+
+REDUCIR DISPAROS
+  Baja el cuerpo del arma (700-1500 Hz), la banda donde el
+  disparo tiene peso y los pasos casi no. Es la unica forma
+  de bajar disparos sin llevarse los pasos por delante.
+
+REDUCIR MOTORES/BOMBAS
+  Agacha vehiculos, helicopteros y explosiones.
+
+REDUCIR BRILLO/CAJAS
+  Baja el tintineo metalico de las cajas de botin y el
+  cristal. Tambien quita fatiga en partidas largas.
+
+BANDA PASOS: EMPIEZA / TERMINA
+  Definen que rango se considera "pasos". Solo tocalos si
+  sabes lo que haces; los valores por defecto estan afinados.
+
+VOLUMEN DE SALIDA
+  Ganancia final. Si oyes distorsion en momentos fuertes,
+  bajalo.
+
+BOTON ON/OFF
+  Apaga el procesamiento sin desinstalar nada. Sirve para
+  comparar a oido: enciende, apaga, decide.
+
+
+SI ALGO SALE MAL
+----------------
+Sin sonido:
+  Clic derecho en ARREGLAR AUDIO.cmd -> Ejecutar como
+  administrador. Reinicia los servicios de audio de Windows.
+  Si aun asi no vuelve, reinicia el equipo.
+
+No oigo ningun cambio al mover los sliders:
+  Casi siempre es el paso 3: no marcaste tus audifonos al
+  instalar Equalizer APO. Vuelve a ejecutar su instalador y
+  marca el dispositivo correcto.
+
+Windows dice "Editor desconocido":
+  El programa no tiene certificado de firma comercial (cuesta
+  dinero al ano). Pulsa "Mas informacion" -> "Ejecutar de
+  todas formas". Si no te fias, no lo ejecutes: es una
+  decision razonable.
+
+
+DESINSTALAR
+-----------
+Ejecuta DESINSTALAR.cmd como administrador, o quitalo desde
+Aplicaciones y caracteristicas. Deja el audio como estaba.
+
+
+LIMITE HONESTO
+--------------
+Esto es ecualizacion, no magia. Pasos y disparos comparten
+frecuencias en 2-5 kHz, asi que ningun filtro fijo puede
+separarlos del todo. Lo que consigues es una ventaja real
+pero moderada: los pasos destacan mas sobre el ruido de
+fondo. Cualquiera que te prometa mas que eso te esta
+vendiendo humo.
