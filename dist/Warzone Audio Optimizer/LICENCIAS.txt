@@ -1,0 +1,49 @@
+===========================================================
+  LICENCIAS Y COMPONENTES DE TERCEROS
+===========================================================
+
+Este paquete incluye EQUALIZER APO, que no es obra nuestra.
+
+  Equalizer APO
+  Autor:    Jonas Thedering y colaboradores
+  Version:  1.4.2 (x64)
+  Licencia: GNU General Public License v3.0 (GPL-3.0)
+  Web:      https://sourceforge.net/projects/equalizerapo/
+
+Equalizer APO es software libre. Se distribuye aqui sin
+modificar, tal cual se descarga de su pagina oficial.
+
+CODIGO FUENTE
+-------------
+La GPL-3.0 da derecho a obtener el codigo fuente. Esta
+publicado por sus autores en:
+
+  https://sourceforge.net/projects/equalizerapo/files/
+
+Ahi estan tanto los binarios como el codigo.
+
+TEXTO DE LA LICENCIA
+--------------------
+  https://www.gnu.org/licenses/gpl-3.0.html
+
+Tambien queda una copia en la carpeta de instalacion de
+Equalizer APO tras instalarlo.
+
+SIN GARANTIA
+------------
+Equalizer APO se distribuye sin ninguna garantia, segun los
+terminos de la GPL-3.0. Lo mismo aplica a Warzone Audio
+Optimizer.
+
+QUE ES CADA COSA
+----------------
+  Equalizer APO ............ el motor. Procesa el audio
+                             dentro de Windows. Software
+                             libre de terceros.
+
+  Warzone Audio Optimizer .. el panel de control. Escribe
+                             la configuracion que Equalizer
+                             APO aplica.
+
+La app no procesa audio: traduce la posicion de los sliders
+al formato de configuracion que entiende Equalizer APO.

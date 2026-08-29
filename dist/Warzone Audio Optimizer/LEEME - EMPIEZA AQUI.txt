@@ -10,37 +10,49 @@ donde viven los pasos y agacha motores, explosiones y el
 cuerpo de los disparos.
 
 No mete delay: el procesamiento ocurre dentro del motor de
-audio de Windows, no en una app intermedia.
-
-
-ANTES DE INSTALAR: LEE ESTO
----------------------------
-Esta app NO procesa el audio por si sola. Es el mando; el
-motor es un programa gratuito llamado Equalizer APO. Hay que
-instalar ese primero.
-
-  1. Descarga Equalizer APO (gratis, codigo abierto):
-     https://sourceforge.net/projects/equalizerapo/
-
-  2. Instala la version de 64 bits.
-
-  3. MUY IMPORTANTE: durante la instalacion aparece una lista
-     de dispositivos de audio. MARCA LA CASILLA DE TUS
-     AUDIFONOS. Si no marcas ninguno, no oiras ningun cambio
-     y pensaras que la app no funciona.
-
-  4. Reinicia Windows. Este paso no es opcional.
+audio de Windows, no en una app intermedia por la que tenga
+que pasar el sonido.
 
 
 INSTALAR
 --------
-  5. Clic derecho en INSTALAR.cmd -> Ejecutar como
-     administrador.
+  1. DESCOMPRIME EL ZIP ENTERO en una carpeta.
+     No ejecutes nada desde dentro del ZIP: el instalador
+     necesita los otros archivos que van al lado.
 
-  6. Abre "Warzone Audio Optimizer" desde el escritorio.
+  2. Clic derecho en INSTALAR.cmd -> "Ejecutar como
+     administrador".
 
-Los cambios se oyen al instante al mover un slider. No hace
-falta reiniciar nada ni cerrar el juego.
+  3. A mitad de la instalacion se abre una ventana con la
+     lista de dispositivos de audio.
+
+     >>> MARCA LA CASILLA DE TUS AUDIFONOS y pulsa OK. <<<
+
+     Es el unico paso que tienes que hacer tu, y es el que
+     mas gente falla. Si no marcas ninguno, todo se instala
+     sin dar ningun error y NO se oye ningun cambio.
+
+     Si no sabes cual es tu dispositivo: mira cual aparece
+     como predeterminado al pulsar el icono de volumen de
+     Windows.
+
+  4. Reinicia Windows cuando te lo pida. No es opcional: el
+     motor de audio no carga hasta reiniciar.
+
+  5. Abre "Warzone Audio Optimizer" desde el escritorio.
+
+Ya esta. Los cambios se oyen al instante al mover un slider,
+sin reiniciar nada y sin cerrar el juego.
+
+
+AVISO DE WINDOWS AL INSTALAR
+----------------------------
+Windows dira "Editor desconocido". Es porque el programa no
+tiene certificado de firma comercial, que cuesta dinero cada
+ano. Pulsa "Mas informacion" -> "Ejecutar de todas formas".
+
+Si no te fias de quien te lo paso, no lo ejecutes. Es una
+decision razonable.
 
 
 LOS CONTROLES
@@ -72,32 +84,47 @@ VOLUMEN DE SALIDA
 
 BOTON ON/OFF
   Apaga el procesamiento sin desinstalar nada. Sirve para
-  comparar a oido: enciende, apaga, decide.
+  comparar a oido: enciende, apaga, decide. Uselo antes de
+  convencerte de que notas una mejora.
 
 
 SI ALGO SALE MAL
 ----------------
-Sin sonido:
-  Clic derecho en ARREGLAR AUDIO.cmd -> Ejecutar como
-  administrador. Reinicia los servicios de audio de Windows.
+No oigo ningun cambio al mover los sliders:
+  Casi siempre es el paso 3: no marcaste tus audifonos.
+  Solucion: menu inicio -> "Configurator" (viene con
+  Equalizer APO), marca tu dispositivo y reinicia.
+  Segunda causa: no reiniciaste tras instalar.
+
+Me quede sin sonido:
+  Clic derecho en ARREGLAR AUDIO.cmd -> "Ejecutar como
+  administrador". Reinicia los servicios de audio de Windows.
   Si aun asi no vuelve, reinicia el equipo.
 
-No oigo ningun cambio al mover los sliders:
-  Casi siempre es el paso 3: no marcaste tus audifonos al
-  instalar Equalizer APO. Vuelve a ejecutar su instalador y
-  marca el dispositivo correcto.
-
-Windows dice "Editor desconocido":
-  El programa no tiene certificado de firma comercial (cuesta
-  dinero al ano). Pulsa "Mas informacion" -> "Ejecutar de
-  todas formas". Si no te fias, no lo ejecutes: es una
-  decision razonable.
+Cambie de audifonos y ya no funciona:
+  Equalizer APO actua sobre dispositivos concretos. Abre
+  "Configurator" y marca los nuevos.
 
 
 DESINSTALAR
 -----------
 Ejecuta DESINSTALAR.cmd como administrador, o quitalo desde
-Aplicaciones y caracteristicas. Deja el audio como estaba.
+Aplicaciones y caracteristicas de Windows.
+
+Deja el audio exactamente como estaba antes, y te pregunta si
+quieres quitar tambien Equalizer APO.
+
+
+QUE SE INSTALA
+--------------
+Dos programas:
+
+  Equalizer APO ... el motor. Software libre de terceros
+                    (GPL-3.0), incluido en el paquete sin
+                    modificar. Ver LICENCIAS.txt.
+
+  La aplicacion ... el panel de control. Escribe la
+                    configuracion que Equalizer APO aplica.
 
 
 LIMITE HONESTO
@@ -106,5 +133,6 @@ Esto es ecualizacion, no magia. Pasos y disparos comparten
 frecuencias en 2-5 kHz, asi que ningun filtro fijo puede
 separarlos del todo. Lo que consigues es una ventaja real
 pero moderada: los pasos destacan mas sobre el ruido de
-fondo. Cualquiera que te prometa mas que eso te esta
-vendiendo humo.
+fondo.
+
+Cualquiera que te prometa mas que eso te esta vendiendo humo.

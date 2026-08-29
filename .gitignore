@@ -24,3 +24,8 @@ installer/package/payload.zip
 # Copia local del .sed con la ruta absoluta del checkout (IExpress la exige).
 # Es específica de cada máquina, no va al repo.
 installer/_local_build.sed
+
+# Binario de terceros incluido en el paquete de distribucion (GPL-3.0,
+# se descarga de sourceforge.net/projects/equalizerapo). No se versiona:
+# son 11 MB que no son codigo nuestro.
+dist/**/EqualizerAPO-*.exe
