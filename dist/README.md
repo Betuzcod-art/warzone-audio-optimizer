@@ -56,3 +56,25 @@ recoge el aviso y el enlace al codigo fuente, como exige la licencia.
 Compress-Archive -Path "dist\Warzone Audio Optimizer\*" `
   -DestinationPath "$([Environment]::GetFolderPath('Desktop'))\Warzone Audio Optimizer.zip" -Force
 ```
+
+## Empezar de cero
+
+`BORRAR TODO Y EMPEZAR DE CERO.cmd` (+ `limpiar.ps1`) desinstala ambos
+programas y borra su configuracion, para cuando una instalacion previa
+quedo a medias.
+
+Dos detalles que obligaron a usar un script y no un comando suelto:
+
+- **La ruta no siempre es la misma.** Se lee `UninstallString` del
+  registro en vez de asumir `C:\Program Files\EqualizerAPO`.
+- **El desinstalador NSIS lanzado con `/S` se desprende del proceso
+  padre**, asi que `-Wait` por si solo no espera a nada. Se pasa el
+  parametro `_?=<dir>`, que lo obliga a ejecutarse en sitio, y aun asi se
+  verifica el resultado antes de continuar.
+
+Termina comprobando que `Audiosrv` y `AudioEndpointBuilder` sigan
+corriendo, y arrancandolos si no. Es la secuencia que dejo el equipo sin
+audio varias veces durante el desarrollo.
+
+Hay que **reiniciar antes de reinstalar**: el APO no se descarga del motor
+de audio hasta entonces, y una instalacion nueva encima queda a medias.
